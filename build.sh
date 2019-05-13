@@ -6,6 +6,7 @@ BASH_XTRACEFD=1
 set -eux
 
 export GOOS=windows
+export GOPROXY=off # Prohibit downloads
 
 mkdir -p /source/cdpx-artifacts
 cd /source/cdpx-artifacts
