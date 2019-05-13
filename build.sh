@@ -14,6 +14,7 @@ cd /source/cdpx-artifacts
 
 go build github.com/Microsoft/hcsshim/cmd/containerd-shim-runhcs-v1
 go build github.com/Microsoft/hcsshim/cmd/runhcs
+go build github.com/Microsoft/hcsshim/cmd/shimdiag
 go build github.com/Microsoft/hcsshim/cmd/tar2ext4
 GOOS=linux go build -buildmode=pie github.com/Microsoft/hcsshim/cmd/tar2ext4
 go build github.com/Microsoft/hcsshim/internal/tools/zapdir
