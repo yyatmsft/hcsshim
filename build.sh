@@ -19,4 +19,7 @@ go build github.com/Microsoft/hcsshim/cmd/tar2ext4
 GOOS=linux go build -buildmode=pie github.com/Microsoft/hcsshim/cmd/tar2ext4
 go build github.com/Microsoft/hcsshim/internal/tools/zapdir
 go build github.com/Microsoft/hcsshim/internal/tools/grantvmgroupaccess
+
+cd /source/test
 go test -c github.com/Microsoft/hcsshim/test/cri-containerd --tags functional
+mv ./cri-containerd.test.exe /source/cdpx-artifacts
