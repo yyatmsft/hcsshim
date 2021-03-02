@@ -7,11 +7,9 @@ import (
 
 	"github.com/Microsoft/hcsshim/cmd/containerd-shim-runhcs-v1/options"
 	"github.com/Microsoft/hcsshim/cmd/containerd-shim-runhcs-v1/stats"
+	"github.com/Microsoft/hcsshim/internal/clone"
 	"github.com/Microsoft/hcsshim/internal/cmd"
-	"github.com/Microsoft/hcsshim/internal/guestrequest"
 	"github.com/Microsoft/hcsshim/internal/log"
-	"github.com/Microsoft/hcsshim/internal/requesttype"
-	hcsschema "github.com/Microsoft/hcsshim/internal/schema2"
 	"github.com/Microsoft/hcsshim/internal/shimdiag"
 	"github.com/Microsoft/hcsshim/internal/uvm"
 	eventstypes "github.com/containerd/containerd/api/events"
@@ -173,6 +171,10 @@ func (wpst *wcowPodSandboxTask) close(ctx context.Context) {
 			if err := wpst.host.Close(); err != nil {
 				log.G(ctx).WithError(err).Error("failed host vm shutdown")
 			}
+			// cleanup template state if any exists
+			if err := clone.RemoveSavedTemplateConfig(wpst.host.ID()); err != nil {
+				log.G(ctx).WithError(err).Error("failed to cleanup template config state for vm")
+			}
 		}
 		// Send the `init` exec exit notification always.
 		exit := wpst.init.Status()
@@ -222,7 +224,7 @@ func (wpst *wcowPodSandboxTask) waitParentExit() {
 
 func (wpst *wcowPodSandboxTask) ExecInHost(ctx context.Context, req *shimdiag.ExecProcessRequest) (int, error) {
 	if wpst.host == nil {
-		return 0, errors.New("task is not isolated")
+		return 0, errTaskNotIsolated
 	}
 	return cmd.ExecInUvm(ctx, wpst.host, req)
 }
@@ -241,35 +243,17 @@ func (wpst *wcowPodSandboxTask) DumpGuestStacks(ctx context.Context) string {
 
 func (wpst *wcowPodSandboxTask) Share(ctx context.Context, req *shimdiag.ShareRequest) error {
 	if wpst.host == nil {
-		return errors.New("task is not isolated")
+		return errTaskNotIsolated
 	}
-	options := wpst.host.DefaultVSMBOptions(req.ReadOnly)
-	_, err := wpst.host.AddVSMB(ctx, req.HostPath, options)
-	if err != nil {
-		return err
-	}
-	sharePath, err := wpst.host.GetVSMBUvmPath(ctx, req.HostPath, req.ReadOnly)
-	if err != nil {
-		return err
-	}
-	guestReq := guestrequest.GuestRequest{
-		ResourceType: guestrequest.ResourceTypeMappedDirectory,
-		RequestType:  requesttype.Add,
-		Settings: &hcsschema.MappedDirectory{
-			HostPath:      sharePath,
-			ContainerPath: req.UvmPath,
-			ReadOnly:      req.ReadOnly,
-		},
-	}
-	return wpst.host.GuestRequest(ctx, guestReq)
+	return wpst.host.Share(ctx, req.HostPath, req.UvmPath, req.ReadOnly)
 }
 
 func (wpst *wcowPodSandboxTask) Stats(ctx context.Context) (*stats.Statistics, error) {
+	stats := &stats.Statistics{}
 	vmStats, err := wpst.host.Stats(ctx)
-	if err != nil {
+	if err != nil && !isStatsNotFound(err) {
 		return nil, err
 	}
-	stats := &stats.Statistics{}
 	stats.VM = vmStats
 	return stats, nil
 }

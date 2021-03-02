@@ -2,14 +2,20 @@ package main
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/Microsoft/hcsshim/cmd/containerd-shim-runhcs-v1/options"
 	"github.com/Microsoft/hcsshim/cmd/containerd-shim-runhcs-v1/stats"
+	"github.com/Microsoft/hcsshim/internal/gcs"
+	"github.com/Microsoft/hcsshim/internal/hcs"
 	"github.com/Microsoft/hcsshim/internal/shimdiag"
+	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/runtime/v2/task"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 )
+
+var errTaskNotIsolated = errors.New("task is not isolated")
 
 // shimTaskPidPair groups a process pid to its execID if it was user generated.
 type shimTaskPidPair struct {
@@ -89,4 +95,14 @@ type shimTask interface {
 	// If the host is hypervisor isolated and this task owns the host additional
 	// metrics on the UVM may be returned as well.
 	Stats(ctx context.Context) (*stats.Statistics, error)
+}
+
+// isStatsNotFound returns true if the err corresponds to a scenario
+// where statistics cannot be retrieved or found
+func isStatsNotFound(err error) bool {
+	return errdefs.IsNotFound(err) ||
+		hcs.IsNotExist(err) ||
+		hcs.IsOperationInvalidState(err) ||
+		gcs.IsNotExist(err) ||
+		hcs.IsAccessIsDenied(err)
 }
