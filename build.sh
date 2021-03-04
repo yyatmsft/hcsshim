@@ -16,10 +16,13 @@ go build github.com/Microsoft/hcsshim/cmd/containerd-shim-runhcs-v1
 go build github.com/Microsoft/hcsshim/cmd/runhcs
 go build github.com/Microsoft/hcsshim/cmd/shimdiag
 go build github.com/Microsoft/hcsshim/cmd/tar2ext4
+go build github.com/Microsoft/hcsshim/cmd/device-util
 GOOS=linux go build -buildmode=pie github.com/Microsoft/hcsshim/cmd/tar2ext4
 go build github.com/Microsoft/hcsshim/internal/tools/zapdir
 go build github.com/Microsoft/hcsshim/internal/tools/grantvmgroupaccess
 
 cd /source/test
 go test -c github.com/Microsoft/hcsshim/test/cri-containerd --tags functional
+go build -o sample-logging-driver.exe cri-containerd/helpers/log.go
 mv ./cri-containerd.test.exe /source/cdpx-artifacts
+mv ./sample-logging-driver.exe /source/cdpx-artifacts
