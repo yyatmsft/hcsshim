@@ -13,28 +13,30 @@ import (
 	"github.com/Microsoft/hcsshim/internal/computeagent"
 	"github.com/Microsoft/hcsshim/internal/log"
 	"github.com/Microsoft/hcsshim/internal/ncproxyttrpc"
+	"github.com/Microsoft/hcsshim/internal/oc"
 	"github.com/Microsoft/hcsshim/internal/uvm"
+	"github.com/Microsoft/hcsshim/pkg/octtrpc"
 	"github.com/containerd/ttrpc"
 	"github.com/pkg/errors"
-	"github.com/sirupsen/logrus"
+	"go.opencensus.io/trace"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
-// GRPC service exposed for use by a Node Network Service. Holds a mutex for
-// updating global client.
-type grpcService struct {
-	m sync.Mutex
-}
+// GRPC service exposed for use by a Node Network Service.
+type grpcService struct{}
 
 var _ ncproxygrpc.NetworkConfigProxyServer = &grpcService{}
 
-func (s *grpcService) AddNIC(ctx context.Context, req *ncproxygrpc.AddNICRequest) (*ncproxygrpc.AddNICResponse, error) {
-	log.G(ctx).WithFields(logrus.Fields{
-		"containerID":  req.ContainerID,
-		"endpointName": req.EndpointName,
-		"nicID":        req.NicID,
-	}).Info("AddNIC request")
+func (s *grpcService) AddNIC(ctx context.Context, req *ncproxygrpc.AddNICRequest) (_ *ncproxygrpc.AddNICResponse, err error) {
+	ctx, span := trace.StartSpan(ctx, "AddNIC")
+	defer span.End()
+	defer func() { oc.SetSpanStatus(span, err) }()
+
+	span.AddAttributes(
+		trace.StringAttribute("containerID", req.ContainerID),
+		trace.StringAttribute("endpointName", req.EndpointName),
+		trace.StringAttribute("nicID", req.NicID))
 
 	if req.ContainerID == "" || req.EndpointName == "" || req.NicID == "" {
 		return nil, status.Errorf(codes.InvalidArgument, "received empty field in request: %+v", req)
@@ -53,12 +55,94 @@ func (s *grpcService) AddNIC(ctx context.Context, req *ncproxygrpc.AddNICRequest
 	return nil, status.Errorf(codes.FailedPrecondition, "No shim registered for namespace `%s`", req.ContainerID)
 }
 
-func (s *grpcService) DeleteNIC(ctx context.Context, req *ncproxygrpc.DeleteNICRequest) (*ncproxygrpc.DeleteNICResponse, error) {
-	log.G(ctx).WithFields(logrus.Fields{
-		"containerID":  req.ContainerID,
-		"nicID":        req.NicID,
-		"endpointName": req.EndpointName,
-	}).Info("DeleteNIC request")
+func (s *grpcService) ModifyNIC(ctx context.Context, req *ncproxygrpc.ModifyNICRequest) (_ *ncproxygrpc.ModifyNICResponse, err error) {
+	ctx, span := trace.StartSpan(ctx, "ModifyNIC")
+	defer span.End()
+	defer func() { oc.SetSpanStatus(span, err) }()
+
+	span.AddAttributes(
+		trace.StringAttribute("containerID", req.ContainerID),
+		trace.StringAttribute("endpointName", req.EndpointName),
+		trace.StringAttribute("nicID", req.NicID))
+
+	log.G(ctx).WithField("iov settings", req.IovPolicySettings).Info("ModifyNIC iov settings")
+
+	if req.ContainerID == "" || req.EndpointName == "" || req.NicID == "" || req.IovPolicySettings == nil {
+		return nil, status.Error(codes.InvalidArgument, "received empty field in request")
+	}
+
+	if client, ok := containerIDToShim[req.ContainerID]; ok {
+		caReq := &computeagent.ModifyNICInternalRequest{
+			NicID:        req.NicID,
+			EndpointName: req.EndpointName,
+			IovPolicySettings: &computeagent.IovSettings{
+				IovOffloadWeight:    req.IovPolicySettings.IovOffloadWeight,
+				QueuePairsRequested: req.IovPolicySettings.QueuePairsRequested,
+				InterruptModeration: req.IovPolicySettings.InterruptModeration,
+			},
+		}
+
+		hcnIOVSettings := &hcn.IovPolicySetting{
+			IovOffloadWeight:    req.IovPolicySettings.IovOffloadWeight,
+			QueuePairsRequested: req.IovPolicySettings.QueuePairsRequested,
+			InterruptModeration: req.IovPolicySettings.InterruptModeration,
+		}
+		rawJSON, err := json.Marshal(hcnIOVSettings)
+		if err != nil {
+			return nil, err
+		}
+
+		iovPolicy := hcn.EndpointPolicy{
+			Type:     hcn.IOV,
+			Settings: rawJSON,
+		}
+		policies := []hcn.EndpointPolicy{iovPolicy}
+
+		ep, err := hcn.GetEndpointByName(req.EndpointName)
+		if err != nil {
+			if _, ok := err.(hcn.EndpointNotFoundError); ok {
+				return nil, status.Errorf(codes.NotFound, "no endpoint with name `%s` found", req.EndpointName)
+			}
+			return nil, errors.Wrapf(err, "failed to get endpoint with name `%s`", req.EndpointName)
+		}
+
+		// To turn off iov offload on an endpoint, we need to first call into HCS to change the
+		// offload weight and then call into HNS to revoke the policy.
+		//
+		// To turn on iov offload, the reverse order is used.
+		if req.IovPolicySettings.IovOffloadWeight == 0 {
+			if _, err := client.ModifyNIC(ctx, caReq); err != nil {
+				return nil, err
+			}
+			if err := modifyEndpoint(ctx, ep.Id, policies, hcn.RequestTypeUpdate); err != nil {
+				return nil, errors.Wrap(err, "failed to modify network adapter")
+			}
+			if err := modifyEndpoint(ctx, ep.Id, policies, hcn.RequestTypeRemove); err != nil {
+				return nil, errors.Wrap(err, "failed to modify network adapter")
+			}
+		} else {
+			if err := modifyEndpoint(ctx, ep.Id, policies, hcn.RequestTypeUpdate); err != nil {
+				return nil, errors.Wrap(err, "failed to modify network adapter")
+			}
+			if _, err := client.ModifyNIC(ctx, caReq); err != nil {
+				return nil, err
+			}
+		}
+
+		return &ncproxygrpc.ModifyNICResponse{}, nil
+	}
+	return nil, status.Errorf(codes.FailedPrecondition, "No shim registered for containerID `%s`", req.ContainerID)
+}
+
+func (s *grpcService) DeleteNIC(ctx context.Context, req *ncproxygrpc.DeleteNICRequest) (_ *ncproxygrpc.DeleteNICResponse, err error) {
+	ctx, span := trace.StartSpan(ctx, "DeleteNIC")
+	defer span.End()
+	defer func() { oc.SetSpanStatus(span, err) }()
+
+	span.AddAttributes(
+		trace.StringAttribute("containerID", req.ContainerID),
+		trace.StringAttribute("endpointName", req.EndpointName),
+		trace.StringAttribute("nicID", req.NicID))
 
 	if req.ContainerID == "" || req.EndpointName == "" || req.NicID == "" {
 		return nil, status.Errorf(codes.InvalidArgument, "received empty field in request: %+v", req)
@@ -83,19 +167,22 @@ func (s *grpcService) DeleteNIC(ctx context.Context, req *ncproxygrpc.DeleteNICR
 //
 // HNS Methods
 //
-func (s *grpcService) CreateNetwork(ctx context.Context, req *ncproxygrpc.CreateNetworkRequest) (*ncproxygrpc.CreateNetworkResponse, error) {
-	log.G(ctx).WithFields(logrus.Fields{
-		"networkName": req.Name,
-		"type":        req.Mode.String(),
-		"ipamType":    req.IpamType,
-	}).Info("CreateNetwork request")
+func (s *grpcService) CreateNetwork(ctx context.Context, req *ncproxygrpc.CreateNetworkRequest) (_ *ncproxygrpc.CreateNetworkResponse, err error) {
+	ctx, span := trace.StartSpan(ctx, "CreateNetwork") //nolint:ineffassign,staticcheck
+	defer span.End()
+	defer func() { oc.SetSpanStatus(span, err) }()
+
+	span.AddAttributes(
+		trace.StringAttribute("networkName", req.Name),
+		trace.StringAttribute("type", req.Mode.String()),
+		trace.StringAttribute("ipamType", req.IpamType.String()))
 
 	if req.Name == "" || req.Mode.String() == "" || req.IpamType.String() == "" || req.SwitchName == "" {
 		return nil, status.Errorf(codes.InvalidArgument, "received empty field in request: %+v", req)
 	}
 
 	// Check if the network already exists, and if so return error.
-	_, err := hcn.GetNetworkByName(req.Name)
+	_, err = hcn.GetNetworkByName(req.Name)
 	if err == nil {
 		return nil, status.Errorf(codes.FailedPrecondition, "network with name %q already exists", req.Name)
 	}
@@ -167,13 +254,53 @@ func (s *grpcService) CreateNetwork(ctx context.Context, req *ncproxygrpc.Create
 	}, nil
 }
 
-func (s *grpcService) CreateEndpoint(ctx context.Context, req *ncproxygrpc.CreateEndpointRequest) (*ncproxygrpc.CreateEndpointResponse, error) {
-	log.G(ctx).WithFields(logrus.Fields{
-		"endpointName": req.Name,
-		"ipAddr":       req.Ipaddress,
-		"macAddr":      req.Macaddress,
-		"networkName":  req.NetworkName,
-	}).Info("CreateEndpoint request")
+func constructEndpointPolicies(req *ncproxygrpc.CreateEndpointRequest) ([]hcn.EndpointPolicy, error) {
+	policies := []hcn.EndpointPolicy{}
+	if req.IovPolicySettings != nil {
+		iovSettings := hcn.IovPolicySetting{
+			IovOffloadWeight:    req.IovPolicySettings.IovOffloadWeight,
+			QueuePairsRequested: req.IovPolicySettings.QueuePairsRequested,
+			InterruptModeration: req.IovPolicySettings.InterruptModeration,
+		}
+		iovJSON, err := json.Marshal(iovSettings)
+		if err != nil {
+			return []hcn.EndpointPolicy{}, errors.Wrap(err, "failed to marshal IovPolicySettings")
+		}
+		policy := hcn.EndpointPolicy{
+			Type:     hcn.IOV,
+			Settings: iovJSON,
+		}
+		policies = append(policies, policy)
+	}
+
+	if req.PortnamePolicySetting != nil {
+		portPolicy := hcn.PortnameEndpointPolicySetting{
+			Name: req.PortnamePolicySetting.PortName,
+		}
+		portPolicyJSON, err := json.Marshal(portPolicy)
+		if err != nil {
+			return []hcn.EndpointPolicy{}, errors.Wrap(err, "failed to marshal portname")
+		}
+		policy := hcn.EndpointPolicy{
+			Type:     hcn.PortName,
+			Settings: portPolicyJSON,
+		}
+		policies = append(policies, policy)
+	}
+
+	return policies, nil
+}
+
+func (s *grpcService) CreateEndpoint(ctx context.Context, req *ncproxygrpc.CreateEndpointRequest) (_ *ncproxygrpc.CreateEndpointResponse, err error) {
+	ctx, span := trace.StartSpan(ctx, "CreateEndpoint") //nolint:ineffassign,staticcheck
+	defer span.End()
+	defer func() { oc.SetSpanStatus(span, err) }()
+
+	span.AddAttributes(
+		trace.StringAttribute("macAddr", req.Macaddress),
+		trace.StringAttribute("endpointName", req.Name),
+		trace.StringAttribute("ipAddr", req.Ipaddress),
+		trace.StringAttribute("networkName", req.NetworkName))
 
 	if req.Name == "" || req.Ipaddress == "" || req.Macaddress == "" || req.NetworkName == "" {
 		return nil, status.Errorf(codes.InvalidArgument, "received empty field in request: %+v", req)
@@ -198,22 +325,9 @@ func (s *grpcService) CreateEndpoint(ctx context.Context, req *ncproxygrpc.Creat
 		PrefixLength: uint8(prefixLen),
 	}
 
-	// Construct the portname policy we'll be setting on the endpoint.
-	var portPolicy hcn.PortnameEndpointPolicySetting
-	if req.PortnamePolicySetting != nil {
-		portPolicy = hcn.PortnameEndpointPolicySetting{
-			Name: req.PortnamePolicySetting.PortName,
-		}
-	}
-	portPolicyJSON, err := json.Marshal(portPolicy)
+	policies, err := constructEndpointPolicies(req)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to marshal portname")
-	}
-
-	// Construct endpoint policy
-	epPolicy := hcn.EndpointPolicy{
-		Type:     hcn.EndpointPolicyType(req.PolicyType.String()),
-		Settings: portPolicyJSON,
+		return nil, errors.Wrap(err, "failed to construct endpoint policies")
 	}
 
 	endpoint := &hcn.HostComputeEndpoint{
@@ -221,7 +335,7 @@ func (s *grpcService) CreateEndpoint(ctx context.Context, req *ncproxygrpc.Creat
 		HostComputeNetwork: network.Id,
 		MacAddress:         req.Macaddress,
 		IpConfigurations:   []hcn.IpConfig{ipConfig},
-		Policies:           []hcn.EndpointPolicy{epPolicy},
+		Policies:           policies,
 		SchemaVersion: hcn.SchemaVersion{
 			Major: 2,
 			Minor: 0,
@@ -238,11 +352,14 @@ func (s *grpcService) CreateEndpoint(ctx context.Context, req *ncproxygrpc.Creat
 	}, nil
 }
 
-func (s *grpcService) AddEndpoint(ctx context.Context, req *ncproxygrpc.AddEndpointRequest) (*ncproxygrpc.AddEndpointResponse, error) {
-	log.G(ctx).WithFields(logrus.Fields{
-		"endpointName": req.Name,
-		"namespaceID":  req.NamespaceID,
-	}).Info("AddEndpoint request")
+func (s *grpcService) AddEndpoint(ctx context.Context, req *ncproxygrpc.AddEndpointRequest) (_ *ncproxygrpc.AddEndpointResponse, err error) {
+	ctx, span := trace.StartSpan(ctx, "AddEndpoint") //nolint:ineffassign,staticcheck
+	defer span.End()
+	defer func() { oc.SetSpanStatus(span, err) }()
+
+	span.AddAttributes(
+		trace.StringAttribute("endpointName", req.Name),
+		trace.StringAttribute("namespaceID", req.NamespaceID))
 
 	if req.Name == "" {
 		return nil, status.Errorf(codes.InvalidArgument, "received empty field in request: %+v", req)
@@ -262,10 +379,13 @@ func (s *grpcService) AddEndpoint(ctx context.Context, req *ncproxygrpc.AddEndpo
 	return &ncproxygrpc.AddEndpointResponse{}, nil
 }
 
-func (s *grpcService) DeleteEndpoint(ctx context.Context, req *ncproxygrpc.DeleteEndpointRequest) (*ncproxygrpc.DeleteEndpointResponse, error) {
-	log.G(ctx).WithFields(logrus.Fields{
-		"endpointName": req.Name,
-	}).Info("DeleteEndpoint request")
+func (s *grpcService) DeleteEndpoint(ctx context.Context, req *ncproxygrpc.DeleteEndpointRequest) (_ *ncproxygrpc.DeleteEndpointResponse, err error) {
+	ctx, span := trace.StartSpan(ctx, "DeleteEndpoint") //nolint:ineffassign,staticcheck
+	defer span.End()
+	defer func() { oc.SetSpanStatus(span, err) }()
+
+	span.AddAttributes(
+		trace.StringAttribute("endpointName", req.Name))
 
 	if req.Name == "" {
 		return nil, status.Errorf(codes.InvalidArgument, "received empty field in request: %+v", req)
@@ -285,10 +405,13 @@ func (s *grpcService) DeleteEndpoint(ctx context.Context, req *ncproxygrpc.Delet
 	return &ncproxygrpc.DeleteEndpointResponse{}, nil
 }
 
-func (s *grpcService) DeleteNetwork(ctx context.Context, req *ncproxygrpc.DeleteNetworkRequest) (*ncproxygrpc.DeleteNetworkResponse, error) {
-	log.G(ctx).WithFields(logrus.Fields{
-		"networkName": req.Name,
-	}).Info("DeleteNetwork request")
+func (s *grpcService) DeleteNetwork(ctx context.Context, req *ncproxygrpc.DeleteNetworkRequest) (_ *ncproxygrpc.DeleteNetworkResponse, err error) {
+	ctx, span := trace.StartSpan(ctx, "DeleteNetwork") //nolint:ineffassign,staticcheck
+	defer span.End()
+	defer func() { oc.SetSpanStatus(span, err) }()
+
+	span.AddAttributes(
+		trace.StringAttribute("networkName", req.Name))
 
 	if req.Name == "" {
 		return nil, status.Errorf(codes.InvalidArgument, "received empty field in request: %+v", req)
@@ -308,10 +431,13 @@ func (s *grpcService) DeleteNetwork(ctx context.Context, req *ncproxygrpc.Delete
 	return &ncproxygrpc.DeleteNetworkResponse{}, nil
 }
 
-func (s *grpcService) GetEndpoint(ctx context.Context, req *ncproxygrpc.GetEndpointRequest) (*ncproxygrpc.GetEndpointResponse, error) {
-	log.G(ctx).WithFields(logrus.Fields{
-		"endpointName": req.Name,
-	}).Info("GetEndpoint request")
+func (s *grpcService) GetEndpoint(ctx context.Context, req *ncproxygrpc.GetEndpointRequest) (_ *ncproxygrpc.GetEndpointResponse, err error) {
+	ctx, span := trace.StartSpan(ctx, "GetEndpoint") //nolint:ineffassign,staticcheck
+	defer span.End()
+	defer func() { oc.SetSpanStatus(span, err) }()
+
+	span.AddAttributes(
+		trace.StringAttribute("endpointName", req.Name))
 
 	if req.Name == "" {
 		return nil, status.Errorf(codes.InvalidArgument, "received empty field in request: %+v", req)
@@ -333,8 +459,10 @@ func (s *grpcService) GetEndpoint(ctx context.Context, req *ncproxygrpc.GetEndpo
 	}, nil
 }
 
-func (s *grpcService) GetEndpoints(ctx context.Context, req *ncproxygrpc.GetEndpointsRequest) (*ncproxygrpc.GetEndpointsResponse, error) {
-	log.G(ctx).Info("GetEndpoints request")
+func (s *grpcService) GetEndpoints(ctx context.Context, req *ncproxygrpc.GetEndpointsRequest) (_ *ncproxygrpc.GetEndpointsResponse, err error) {
+	ctx, span := trace.StartSpan(ctx, "GetEndpoints") //nolint:ineffassign,staticcheck
+	defer span.End()
+	defer func() { oc.SetSpanStatus(span, err) }()
 
 	rawEndpoints, err := hcn.ListEndpoints()
 	if err != nil {
@@ -356,10 +484,13 @@ func (s *grpcService) GetEndpoints(ctx context.Context, req *ncproxygrpc.GetEndp
 	}, nil
 }
 
-func (s *grpcService) GetNetwork(ctx context.Context, req *ncproxygrpc.GetNetworkRequest) (*ncproxygrpc.GetNetworkResponse, error) {
-	log.G(ctx).WithFields(logrus.Fields{
-		"networkName": req.Name,
-	}).Info("GetNetwork request")
+func (s *grpcService) GetNetwork(ctx context.Context, req *ncproxygrpc.GetNetworkRequest) (_ *ncproxygrpc.GetNetworkResponse, err error) {
+	ctx, span := trace.StartSpan(ctx, "GetNetwork") //nolint:ineffassign,staticcheck
+	defer span.End()
+	defer func() { oc.SetSpanStatus(span, err) }()
+
+	span.AddAttributes(
+		trace.StringAttribute("networkName", req.Name))
 
 	if req.Name == "" {
 		return nil, status.Errorf(codes.InvalidArgument, "received empty field in request: %+v", req)
@@ -379,8 +510,10 @@ func (s *grpcService) GetNetwork(ctx context.Context, req *ncproxygrpc.GetNetwor
 	}, nil
 }
 
-func (s *grpcService) GetNetworks(ctx context.Context, req *ncproxygrpc.GetNetworksRequest) (*ncproxygrpc.GetNetworksResponse, error) {
-	log.G(ctx).Info("GetNetworks request")
+func (s *grpcService) GetNetworks(ctx context.Context, req *ncproxygrpc.GetNetworksRequest) (_ *ncproxygrpc.GetNetworksResponse, err error) {
+	ctx, span := trace.StartSpan(ctx, "GetNetworks") //nolint:ineffassign,staticcheck
+	defer span.End()
+	defer func() { oc.SetSpanStatus(span, err) }()
 
 	rawNetworks, err := hcn.ListNetworks()
 	if err != nil {
@@ -407,17 +540,24 @@ type ttrpcService struct {
 	m sync.Mutex
 }
 
-func (s *ttrpcService) RegisterComputeAgent(ctx context.Context, req *ncproxyttrpc.RegisterComputeAgentRequest) (*ncproxyttrpc.RegisterComputeAgentResponse, error) {
-	log.G(ctx).WithFields(logrus.Fields{
-		"containerID":  req.ContainerID,
-		"agentAddress": req.AgentAddress,
-	}).Info("RegisterComputeAgent request")
+func (s *ttrpcService) RegisterComputeAgent(ctx context.Context, req *ncproxyttrpc.RegisterComputeAgentRequest) (_ *ncproxyttrpc.RegisterComputeAgentResponse, err error) {
+	ctx, span := trace.StartSpan(ctx, "RegisterComputeAgent") //nolint:ineffassign,staticcheck
+	defer span.End()
+	defer func() { oc.SetSpanStatus(span, err) }()
+
+	span.AddAttributes(
+		trace.StringAttribute("containerID", req.ContainerID),
+		trace.StringAttribute("agentAddress", req.AgentAddress))
 
 	conn, err := winio.DialPipe(req.AgentAddress, nil)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to connect to compute agent service")
 	}
-	client := ttrpc.NewClient(conn, ttrpc.WithOnClose(func() { conn.Close() }))
+	client := ttrpc.NewClient(
+		conn,
+		ttrpc.WithUnaryClientInterceptor(octtrpc.ClientInterceptor()),
+		ttrpc.WithOnClose(func() { conn.Close() }),
+	)
 	// Add to global client map if connection succeeds. Don't check if there's already a map entry
 	// just overwrite as the client may have changed the address of the config agent.
 	s.m.Lock()
@@ -426,11 +566,14 @@ func (s *ttrpcService) RegisterComputeAgent(ctx context.Context, req *ncproxyttr
 	return &ncproxyttrpc.RegisterComputeAgentResponse{}, nil
 }
 
-func (s *ttrpcService) ConfigureNetworking(ctx context.Context, req *ncproxyttrpc.ConfigureNetworkingInternalRequest) (*ncproxyttrpc.ConfigureNetworkingInternalResponse, error) {
-	log.G(ctx).WithFields(logrus.Fields{
-		"containerID": req.ContainerID,
-		"RequestType": req.RequestType,
-	}).Info("ConfigureNetworking request")
+func (s *ttrpcService) ConfigureNetworking(ctx context.Context, req *ncproxyttrpc.ConfigureNetworkingInternalRequest) (_ *ncproxyttrpc.ConfigureNetworkingInternalResponse, err error) {
+	ctx, span := trace.StartSpan(ctx, "ConfigureNetworking") //nolint:ineffassign,staticcheck
+	defer span.End()
+	defer func() { oc.SetSpanStatus(span, err) }()
+
+	span.AddAttributes(
+		trace.StringAttribute("containerID", req.ContainerID),
+		trace.StringAttribute("agentAddress", req.RequestType.String()))
 
 	if req.ContainerID == "" {
 		return nil, status.Error(codes.InvalidArgument, "ContainerID is empty")
@@ -456,4 +599,23 @@ func (s *ttrpcService) ConfigureNetworking(ctx context.Context, req *ncproxyttrp
 		return nil, err
 	}
 	return &ncproxyttrpc.ConfigureNetworkingInternalResponse{}, nil
+}
+
+func modifyEndpoint(ctx context.Context, id string, policies []hcn.EndpointPolicy, requestType hcn.RequestType) error {
+	endpointRequest := hcn.PolicyEndpointRequest{
+		Policies: policies,
+	}
+
+	settingsJSON, err := json.Marshal(endpointRequest)
+	if err != nil {
+		return err
+	}
+
+	requestMessage := &hcn.ModifyEndpointSettingRequest{
+		ResourceType: hcn.EndpointResourceTypePolicy,
+		RequestType:  requestType,
+		Settings:     settingsJSON,
+	}
+
+	return hcn.ModifyEndpointSettings(id, requestMessage)
 }

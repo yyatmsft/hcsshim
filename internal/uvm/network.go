@@ -512,7 +512,7 @@ func (uvm *UtilityVM) isNetworkNamespaceSupported() bool {
 }
 
 func getNetworkModifyRequest(adapterID string, requestType string, settings interface{}) interface{} {
-	if osversion.Get().Build >= osversion.RS5 {
+	if osversion.Build() >= osversion.RS5 {
 		return guestrequest.NetworkModifyRequest{
 			AdapterId:   adapterID,
 			RequestType: requestType,
@@ -641,4 +641,14 @@ func (uvm *UtilityVM) RemoveAllNICs(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// UpdateNIC updates a UVM's network adapter.
+func (uvm *UtilityVM) UpdateNIC(ctx context.Context, id string, settings *hcsschema.NetworkAdapter) error {
+	req := &hcsschema.ModifySettingRequest{
+		RequestType:  requesttype.Update,
+		ResourcePath: fmt.Sprintf(networkResourceFormat, id),
+		Settings:     settings,
+	}
+	return uvm.modify(ctx, req)
 }

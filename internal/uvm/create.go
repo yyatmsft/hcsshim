@@ -145,11 +145,11 @@ func verifyOptions(ctx context.Context, options interface{}) error {
 				return errors.New("PreferredRootFSTypeVHD requires at least one VPMem device")
 			}
 		}
-		if opts.KernelDirect && osversion.Get().Build < 18286 {
+		if opts.KernelDirect && osversion.Build() < 18286 {
 			return errors.New("KernelDirectBoot is not supported on builds older than 18286")
 		}
 
-		if opts.EnableColdDiscardHint && osversion.Get().Build < 18967 {
+		if opts.EnableColdDiscardHint && osversion.Build() < 18967 {
 			return errors.New("EnableColdDiscardHint is not supported on builds older than 18967")
 		}
 	case *OptionsWCOW:
@@ -217,8 +217,8 @@ func (uvm *UtilityVM) create(ctx context.Context, doc interface{}) error {
 	}
 	defer func() {
 		if system != nil {
-			system.Terminate(ctx)
-			system.Wait()
+			_ = system.Terminate(ctx)
+			_ = system.Wait()
 		}
 	}()
 
@@ -251,8 +251,8 @@ func (uvm *UtilityVM) Close() (err error) {
 		if err := uvm.ReleaseCPUGroup(ctx); err != nil {
 			log.G(ctx).WithError(err).Warn("failed to release VM resource")
 		}
-		uvm.hcsSystem.Terminate(ctx)
-		uvm.Wait()
+		_ = uvm.hcsSystem.Terminate(ctx)
+		_ = uvm.Wait()
 	}
 
 	if err := uvm.CloseGCSConnection(); err != nil {

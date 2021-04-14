@@ -6,13 +6,14 @@ import (
 	"text/tabwriter"
 
 	"github.com/Microsoft/hcsshim/internal/appargs"
+	"github.com/Microsoft/hcsshim/internal/shimdiag"
 	"github.com/urfave/cli"
 )
 
 var listCommand = cli.Command{
 	Name:      "list",
 	Usage:     "Lists running shims",
-	ArgsUsage: " ",
+	ArgsUsage: "[flags]",
 	Flags: []cli.Flag{
 		cli.BoolFlag{
 			Name:  "pids",
@@ -22,7 +23,7 @@ var listCommand = cli.Command{
 	Before: appargs.Validate(),
 	Action: func(ctx *cli.Context) error {
 		pids := ctx.Bool("pids")
-		shims, err := findShims("")
+		shims, err := shimdiag.FindShims("")
 		if err != nil {
 			return err
 		}

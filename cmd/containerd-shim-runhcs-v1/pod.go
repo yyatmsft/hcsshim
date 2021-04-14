@@ -55,7 +55,7 @@ type shimPod interface {
 func createPod(ctx context.Context, events publisher, req *task.CreateTaskRequest, s *specs.Spec) (shimPod, error) {
 	log.G(ctx).WithField("tid", req.ID).Debug("createPod")
 
-	if osversion.Get().Build < osversion.RS5 {
+	if osversion.Build() < osversion.RS5 {
 		return nil, errors.Wrapf(errdefs.ErrFailedPrecondition, "pod support is not available on Windows versions previous to RS5 (%d)", osversion.RS5)
 	}
 
@@ -176,7 +176,7 @@ func createPod(ctx context.Context, events publisher, req *task.CreateTaskReques
 		p.sandboxTask = newWcowPodSandboxTask(ctx, events, req.ID, req.Bundle, parent, nsid)
 		// Publish the created event. We only do this for a fake WCOW task. A
 		// HCS Task will event itself based on actual process lifetime.
-		events.publishEvent(
+		if err := events.publishEvent(
 			ctx,
 			runtime.TaskCreateEventTopic,
 			&eventstypes.TaskCreate{
@@ -191,7 +191,9 @@ func createPod(ctx context.Context, events publisher, req *task.CreateTaskReques
 				},
 				Checkpoint: "",
 				Pid:        0,
-			})
+			}); err != nil {
+			return nil, err
+		}
 	} else {
 		if isWCOW {
 			// The pause container activation will immediately exit on Windows

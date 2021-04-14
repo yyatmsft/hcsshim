@@ -17,7 +17,7 @@ import (
 var shareCommand = cli.Command{
 	Name:      "share",
 	Usage:     "Share a file/directory in a shim's hosting utility VM",
-	ArgsUsage: "<shim name> <host_path> <uvm_path>",
+	ArgsUsage: "[flags] <shim name> <host_path> <uvm_path>",
 	Flags: []cli.Flag{
 		cli.BoolFlag{
 			Name:  "readonly,ro",
@@ -33,7 +33,7 @@ var shareCommand = cli.Command{
 			hostPath = args[1]
 			uvmPath  = args[2]
 		)
-		shim, err := getShim(shimName)
+		shim, err := shimdiag.GetShim(shimName)
 		if err != nil {
 			return err
 		}

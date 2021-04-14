@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -17,12 +18,12 @@ import (
 	"github.com/containerd/containerd"
 	eventtypes "github.com/containerd/containerd/api/events"
 	eventsapi "github.com/containerd/containerd/api/services/events/v1"
+	kubeutil "github.com/containerd/containerd/integration/remote/util"
 	eventruntime "github.com/containerd/containerd/runtime"
 	"github.com/containerd/typeurl"
 	"github.com/gogo/protobuf/types"
 	"google.golang.org/grpc"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
-	kubeutil "k8s.io/kubernetes/pkg/kubelet/util"
 )
 
 const (
@@ -39,12 +40,15 @@ const (
 	testDriversPath        = "C:\\ContainerPlat\\testdrivers"
 	testGPUBootFiles       = "C:\\ContainerPlat\\LinuxBootFiles\\nvidiagpu"
 
-	lcowRuntimeHandler  = "runhcs-lcow"
-	imageLcowK8sPause   = "k8s.gcr.io/pause:3.1"
-	imageLcowAlpine     = "docker.io/library/alpine:latest"
-	imageLcowCosmos     = "cosmosarno/spark-master:2.4.1_2019-04-18_8e864ce"
-	alpineAspNet        = "mcr.microsoft.com/dotnet/core/aspnet:3.1-alpine3.11"
-	alpineAspnetUpgrade = "mcr.microsoft.com/dotnet/core/aspnet:3.1.2-alpine3.11"
+	lcowRuntimeHandler   = "runhcs-lcow"
+	imageLcowK8sPause    = "k8s.gcr.io/pause:3.1"
+	imageLcowAlpine      = "docker.io/library/alpine:latest"
+	imageLcowCosmos      = "cosmosarno/spark-master:2.4.1_2019-04-18_8e864ce"
+	imageJobContainerHNS = "cplatpublic.azurecr.io/jobcontainer_hns:latest"
+	imageJobContainerETW = "cplatpublic.azurecr.io/jobcontainer_etw:latest"
+	imageJobContainerVHD = "cplatpublic.azurecr.io/jobcontainer_vhd:latest"
+	alpineAspNet         = "mcr.microsoft.com/dotnet/core/aspnet:3.1-alpine3.11"
+	alpineAspnetUpgrade  = "mcr.microsoft.com/dotnet/core/aspnet:3.1.2-alpine3.11"
 	// Default account name for use with GMSA related tests. This will not be
 	// present/you will not have access to the account on your machine unless
 	// your environment is configured properly.
@@ -53,8 +57,8 @@ const (
 
 // Image definitions
 var (
-	imageWindowsNanoserver      = getWindowsNanoserverImage(osversion.Get().Build)
-	imageWindowsServercore      = getWindowsServerCoreImage(osversion.Get().Build)
+	imageWindowsNanoserver      = getWindowsNanoserverImage(osversion.Build())
+	imageWindowsServercore      = getWindowsServerCoreImage(osversion.Build())
 	imageWindowsNanoserver17763 = getWindowsNanoserverImage(osversion.RS5)
 	imageWindowsNanoserver18362 = getWindowsNanoserverImage(osversion.V19H1)
 	imageWindowsNanoserver19041 = getWindowsNanoserverImage(osversion.V20H1)
@@ -117,14 +121,36 @@ func requireFeatures(t *testing.T, features ...string) {
 	}
 }
 
+// requireBinary checks if `binary` exists in the same directory as the test
+// binary.
+// Returns full binary path if it exists, otherwise, skips the test.
+func requireBinary(t *testing.T, binary string) string {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Skipf("error locating executable: %s", err)
+		return ""
+	}
+	baseDir := filepath.Dir(executable)
+	binaryPath := filepath.Join(baseDir, binary)
+	if _, err := os.Stat(binaryPath); os.IsNotExist(err) {
+		t.Skipf("binary not found: %s", binaryPath)
+		return ""
+	}
+	return binaryPath
+}
+
 func getWindowsNanoserverImage(build uint16) string {
 	switch build {
 	case osversion.RS5:
 		return "mcr.microsoft.com/windows/nanoserver:1809"
 	case osversion.V19H1:
 		return "mcr.microsoft.com/windows/nanoserver:1903"
+	case osversion.V19H2:
+		return "mcr.microsoft.com/windows/nanoserver:1909"
 	case osversion.V20H1:
 		return "mcr.microsoft.com/windows/nanoserver:2004"
+	case osversion.V20H2:
+		return "mcr.microsoft.com/windows/nanoserver:2009"
 	default:
 		panic("unsupported build")
 	}
@@ -136,8 +162,12 @@ func getWindowsServerCoreImage(build uint16) string {
 		return "mcr.microsoft.com/windows/servercore:1809"
 	case osversion.V19H1:
 		return "mcr.microsoft.com/windows/servercore:1903"
+	case osversion.V19H2:
+		return "mcr.microsoft.com/windows/servercore:1909"
 	case osversion.V20H1:
 		return "mcr.microsoft.com/windows/servercore:2004"
+	case osversion.V20H2:
+		return "mcr.microsoft.com/windows/servercore:2009"
 	default:
 		panic("unsupported build")
 	}

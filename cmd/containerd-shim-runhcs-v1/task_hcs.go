@@ -53,7 +53,7 @@ func newHcsStandaloneTask(ctx context.Context, events publisher, req *task.Creat
 	owner := filepath.Base(os.Args[0])
 
 	var parent *uvm.UtilityVM
-	if osversion.Get().Build >= osversion.RS5 && oci.IsIsolated(s) {
+	if osversion.Build() >= osversion.RS5 && oci.IsIsolated(s) {
 		// Create the UVM parent
 		opts, err := oci.SpecToUVMCreateOpts(ctx, s, fmt.Sprintf("%s@vm", req.ID), owner)
 		if err != nil {
@@ -147,12 +147,11 @@ func newHcsTask(
 	}
 
 	opts := hcsoci.CreateOptions{
-		ID:                      req.ID,
-		Owner:                   owner,
-		Spec:                    s,
-		HostingSystem:           parent,
-		NetworkNamespace:        netNS,
-		ScaleCPULimitsToSandbox: shimOpts.ScaleCpuLimitsToSandbox,
+		ID:               req.ID,
+		Owner:            owner,
+		Spec:             s,
+		HostingSystem:    parent,
+		NetworkNamespace: netNS,
 	}
 
 	if shimOpts != nil {
@@ -204,7 +203,7 @@ func newHcsTask(
 	go ht.waitInitExit(!isTemplate)
 
 	// Publish the created event
-	ht.events.publishEvent(
+	if err := ht.events.publishEvent(
 		ctx,
 		runtime.TaskCreateEventTopic,
 		&eventstypes.TaskCreate{
@@ -219,7 +218,9 @@ func newHcsTask(
 			},
 			Checkpoint: "",
 			Pid:        uint32(ht.init.Pid()),
-		})
+		}); err != nil {
+		return nil, err
+	}
 	return ht, nil
 }
 
@@ -312,7 +313,7 @@ func newClonedHcsTask(
 	go ht.waitInitExit(true)
 
 	// Publish the created event
-	ht.events.publishEvent(
+	if err := ht.events.publishEvent(
 		ctx,
 		runtime.TaskCreateEventTopic,
 		&eventstypes.TaskCreate{
@@ -327,7 +328,9 @@ func newClonedHcsTask(
 			},
 			Checkpoint: "",
 			Pid:        uint32(ht.init.Pid()),
-		})
+		}); err != nil {
+		return nil, err
+	}
 	return ht, nil
 }
 
@@ -372,7 +375,7 @@ type hcsTask struct {
 	// host is the hosting VM for this exec if hypervisor isolated. If
 	// `host==nil` this is an Argon task so no UVM cleanup is required.
 	//
-	// NOTE: if `osversion.Get().Build < osversion.RS5` this will always be
+	// NOTE: if `osversion.Build() < osversion.RS5` this will always be
 	// `nil`.
 	host *uvm.UtilityVM
 
@@ -443,15 +446,13 @@ func (ht *hcsTask) CreateExec(ctx context.Context, req *task.ExecProcessRequest,
 	ht.execs.Store(req.ExecID, he)
 
 	// Publish the created event
-	ht.events.publishEvent(
+	return ht.events.publishEvent(
 		ctx,
 		runtime.TaskExecAddedEventTopic,
 		&eventstypes.TaskExecAdded{
 			ContainerID: ht.id,
 			ExecID:      req.ExecID,
 		})
-
-	return nil
 }
 
 func (ht *hcsTask) GetExec(eid string) (shimExec, error) {
@@ -542,7 +543,7 @@ func (ht *hcsTask) DeleteExec(ctx context.Context, eid string) (int, uint32, tim
 	}
 
 	// Publish the deleted event
-	ht.events.publishEvent(
+	if err := ht.events.publishEvent(
 		ctx,
 		runtime.TaskDeleteEventTopic,
 		&eventstypes.TaskDelete{
@@ -551,7 +552,9 @@ func (ht *hcsTask) DeleteExec(ctx context.Context, eid string) (int, uint32, tim
 			Pid:         status.Pid,
 			ExitStatus:  status.ExitStatus,
 			ExitedAt:    status.ExitedAt,
-		})
+		}); err != nil {
+		return 0, 0, time.Time{}, err
+	}
 
 	return int(status.Pid), status.ExitStatus, status.ExitedAt, nil
 }
@@ -741,7 +744,8 @@ func (ht *hcsTask) closeHost(ctx context.Context) {
 		}
 		// Send the `init` exec exit notification always.
 		exit := ht.init.Status()
-		ht.events.publishEvent(
+
+		if err := ht.events.publishEvent(
 			ctx,
 			runtime.TaskExitEventTopic,
 			&eventstypes.TaskExit{
@@ -750,7 +754,9 @@ func (ht *hcsTask) closeHost(ctx context.Context) {
 				Pid:         uint32(exit.Pid),
 				ExitStatus:  exit.ExitStatus,
 				ExitedAt:    exit.ExitedAt,
-			})
+			}); err != nil {
+			log.G(ctx).WithError(err).Error("failed to publish TaskExitEventTopic")
+		}
 		close(ht.closed)
 	})
 }

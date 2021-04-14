@@ -83,7 +83,7 @@ func MountContainerLayers(ctx context.Context, layerFolders []string, guestRoot 
 		}
 		defer func() {
 			if err != nil {
-				wclayer.DeactivateLayer(ctx, path)
+				_ = wclayer.DeactivateLayer(ctx, path)
 			}
 		}()
 
@@ -92,7 +92,7 @@ func MountContainerLayers(ctx context.Context, layerFolders []string, guestRoot 
 		}
 		defer func() {
 			if err != nil {
-				wclayer.UnprepareLayer(ctx, path)
+				_ = wclayer.UnprepareLayer(ctx, path)
 			}
 		}()
 
@@ -161,7 +161,8 @@ func MountContainerLayers(ctx context.Context, layerFolders []string, guestRoot 
 	}
 	log.G(ctx).WithField("hostPath", hostPath).Debug("mounting scratch VHD")
 
-	scsiMount, err := uvm.AddSCSI(ctx, hostPath, containerScratchPathInUVM, false, uvmpkg.VMAccessTypeIndividual)
+	var options []string
+	scsiMount, err := uvm.AddSCSI(ctx, hostPath, containerScratchPathInUVM, false, options, uvmpkg.VMAccessTypeIndividual)
 	if err != nil {
 		return "", fmt.Errorf("failed to add SCSI scratch VHD: %s", err)
 	}
@@ -188,7 +189,8 @@ func MountContainerLayers(ctx context.Context, layerFolders []string, guestRoot 
 	if uvm.OS() == "windows" {
 		// 	Load the filter at the C:\s<ID> location calculated above. We pass into this request each of the
 		// 	read-only layer folders.
-		layers, err := GetHCSLayers(ctx, uvm, layersAdded)
+		var layers []hcsschema.Layer
+		layers, err = GetHCSLayers(ctx, uvm, layersAdded)
 		if err != nil {
 			return "", err
 		}
@@ -222,8 +224,9 @@ func addLCOWLayer(ctx context.Context, uvm *uvmpkg.UtilityVM, layerPath string) 
 		}
 	}
 
+	options := []string{"ro"}
 	uvmPath = fmt.Sprintf(uvmpkg.LCOWGlobalMountPrefix, uvm.UVMMountCounter())
-	sm, err := uvm.AddSCSI(ctx, layerPath, uvmPath, true, uvmpkg.VMAccessTypeNoop)
+	sm, err := uvm.AddSCSI(ctx, layerPath, uvmPath, true, options, uvmpkg.VMAccessTypeNoop)
 	if err != nil {
 		return "", fmt.Errorf("failed to add SCSI layer: %s", err)
 	}
