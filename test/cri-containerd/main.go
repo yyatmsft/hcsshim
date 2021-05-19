@@ -36,9 +36,14 @@ const (
 	wcowHypervisor18362RuntimeHandler = "runhcs-wcow-hypervisor-18362"
 	wcowHypervisor19041RuntimeHandler = "runhcs-wcow-hypervisor-19041"
 
-	testDeviceUtilFilePath = "C:\\ContainerPlat\\device-util.exe"
-	testDriversPath        = "C:\\ContainerPlat\\testdrivers"
-	testGPUBootFiles       = "C:\\ContainerPlat\\LinuxBootFiles\\nvidiagpu"
+	testDeviceUtilFilePath    = "C:\\ContainerPlat\\device-util.exe"
+	testJobObjectUtilFilePath = "C:\\ContainerPlat\\jobobject-util.exe"
+
+	testDriversPath  = "C:\\ContainerPlat\\testdrivers"
+	testGPUBootFiles = "C:\\ContainerPlat\\LinuxBootFiles\\nvidiagpu"
+
+	testVMServiceAddress = "C:\\ContainerPlat\\vmservice.sock"
+	testVMServiceBinary  = "C:\\Containerplat\\vmservice.exe"
 
 	lcowRuntimeHandler   = "runhcs-lcow"
 	imageLcowK8sPause    = "k8s.gcr.io/pause:3.1"
@@ -69,8 +74,10 @@ var (
 
 // Flags
 var (
-	flagFeatures    = testutilities.NewStringSetFlag()
-	flagCRIEndpoint = flag.String("cri-endpoint", "tcp://127.0.0.1:2376", "Address of CRI runtime and image service.")
+	flagFeatures        = testutilities.NewStringSetFlag()
+	flagCRIEndpoint     = flag.String("cri-endpoint", "tcp://127.0.0.1:2376", "Address of CRI runtime and image service.")
+	flagVirtstack       = flag.String("virtstack", "", "Virtstack to use for hypervisor isolated containers")
+	flagVMServiceBinary = flag.String("vmservice-binary", "", "Path to a binary implementing the vmservice ttrpc service")
 )
 
 // Features

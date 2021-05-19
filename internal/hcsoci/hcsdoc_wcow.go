@@ -9,12 +9,12 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/Microsoft/hcsshim/internal/hcs/schema1"
+	hcsschema "github.com/Microsoft/hcsshim/internal/hcs/schema2"
 	"github.com/Microsoft/hcsshim/internal/layers"
 	"github.com/Microsoft/hcsshim/internal/log"
 	"github.com/Microsoft/hcsshim/internal/oci"
 	"github.com/Microsoft/hcsshim/internal/processorinfo"
-	"github.com/Microsoft/hcsshim/internal/schema1"
-	hcsschema "github.com/Microsoft/hcsshim/internal/schema2"
 	"github.com/Microsoft/hcsshim/internal/uvm"
 	"github.com/Microsoft/hcsshim/internal/uvmfolder"
 	"github.com/Microsoft/hcsshim/internal/wclayer"
@@ -37,9 +37,7 @@ func createMountsConfig(ctx context.Context, coi *createOptionsInternal) (*mount
 	// TODO: Mapped pipes to add in v2 schema.
 	var config mountsConfig
 	for _, mount := range coi.Spec.Mounts {
-		if mount.Type != "" {
-			return nil, fmt.Errorf("invalid container spec - Mount.Type '%s' must not be set", mount.Type)
-		}
+
 		if uvm.IsPipe(mount.Source) {
 			src, dst := uvm.GetContainerPipeMapping(coi.HostingSystem, mount)
 			config.mpsv1 = append(config.mpsv1, schema1.MappedPipe{HostPath: src, ContainerPipeName: dst})
@@ -63,18 +61,17 @@ func createMountsConfig(ctx context.Context, coi *createOptionsInternal) (*mount
 					return nil, fmt.Errorf("failed to eval symlinks for mount source %q: %s", mount.Source, err)
 				}
 				mdv2.HostPath = src
+			} else if mount.Type == "virtual-disk" || mount.Type == "physical-disk" {
+				uvmPath, err := coi.HostingSystem.GetScsiUvmPath(ctx, mount.Source)
+				if err != nil {
+					return nil, err
+				}
+				mdv2.HostPath = uvmPath
 			} else {
+				// vsmb mount
 				uvmPath, err := coi.HostingSystem.GetVSMBUvmPath(ctx, mount.Source, readOnly)
 				if err != nil {
-					if err == uvm.ErrNotAttached {
-						// It could also be a scsi mount.
-						uvmPath, err = coi.HostingSystem.GetScsiUvmPath(ctx, mount.Source)
-						if err != nil {
-							return nil, err
-						}
-					} else {
-						return nil, err
-					}
+					return nil, err
 				}
 				mdv2.HostPath = uvmPath
 			}
@@ -122,14 +119,7 @@ func ConvertCPULimits(ctx context.Context, cid string, spec *specs.Spec, maxCPUC
 	if cpuNumSet > 1 {
 		return 0, 0, 0, fmt.Errorf("invalid spec - Windows Container CPU Count: '%d', Limit: '%d', and Weight: '%d' are mutually exclusive", cpuCount, cpuLimit, cpuWeight)
 	} else if cpuNumSet == 1 {
-		if cpuCount > maxCPUCount {
-			log.G(ctx).WithFields(logrus.Fields{
-				"cid":       cid,
-				"requested": cpuCount,
-				"assigned":  maxCPUCount,
-			}).Warn("Changing user requested CPUCount to current number of processors")
-			cpuCount = maxCPUCount
-		}
+		cpuCount = NormalizeProcessorCount(ctx, cid, cpuCount, maxCPUCount)
 	}
 	return cpuCount, cpuLimit, cpuWeight, nil
 }

@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/Microsoft/hcsshim/internal/cow"
-	hcsschema "github.com/Microsoft/hcsshim/internal/schema2"
+	hcsschema "github.com/Microsoft/hcsshim/internal/hcs/schema2"
 )
 
 type localProcessHost struct {
@@ -104,6 +104,14 @@ func (p *localProcess) Close() error {
 
 func (p *localProcess) CloseStdin(ctx context.Context) error {
 	return p.stdin.Close()
+}
+
+func (p *localProcess) CloseStdout(ctx context.Context) error {
+	return p.stdout.Close()
+}
+
+func (p *localProcess) CloseStderr(ctx context.Context) error {
+	return p.stderr.Close()
 }
 
 func (p *localProcess) ExitCode() (int, error) {

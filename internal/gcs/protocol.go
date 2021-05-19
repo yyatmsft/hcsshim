@@ -5,8 +5,8 @@ import (
 	"fmt"
 
 	"github.com/Microsoft/go-winio/pkg/guid"
-	"github.com/Microsoft/hcsshim/internal/schema1"
-	hcsschema "github.com/Microsoft/hcsshim/internal/schema2"
+	"github.com/Microsoft/hcsshim/internal/hcs/schema1"
+	hcsschema "github.com/Microsoft/hcsshim/internal/hcs/schema2"
 )
 
 // LinuxGcsVsockPort is the vsock port number that the Linux GCS will
@@ -360,9 +360,4 @@ type containerGetPropertiesResponse struct {
 type containerGetPropertiesResponseV2 struct {
 	responseBase
 	Properties containerPropertiesV2
-}
-
-type updateContainerRequest struct {
-	requestBase
-	Resources string
 }

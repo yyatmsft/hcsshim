@@ -15,10 +15,10 @@ import (
 	"github.com/Microsoft/go-winio"
 	"github.com/Microsoft/go-winio/pkg/guid"
 	"github.com/Microsoft/hcsshim/internal/cow"
+	"github.com/Microsoft/hcsshim/internal/hcs/schema1"
 	"github.com/Microsoft/hcsshim/internal/log"
 	"github.com/Microsoft/hcsshim/internal/logfields"
 	"github.com/Microsoft/hcsshim/internal/oc"
-	"github.com/Microsoft/hcsshim/internal/schema1"
 	"github.com/sirupsen/logrus"
 	"go.opencensus.io/trace"
 )
@@ -191,25 +191,6 @@ func (gc *GuestConnection) DeleteContainerState(ctx context.Context, cid string)
 	}
 	var resp responseBase
 	return gc.brdg.RPC(ctx, rpcDeleteContainerState, &req, &resp, false)
-}
-
-func (gc *GuestConnection) UpdateContainer(ctx context.Context, cid string, resources interface{}) (err error) {
-	ctx, span := trace.StartSpan(ctx, "gcs::GuestConnection::UpdateContainer")
-	defer span.End()
-	defer func() { oc.SetSpanStatus(span, err) }()
-	span.AddAttributes(trace.StringAttribute("cid", cid))
-
-	resourcesJSON, err := json.Marshal(resources)
-	if err != nil {
-		return err
-	}
-
-	req := updateContainerRequest{
-		requestBase: makeRequest(ctx, cid),
-		Resources:   string(resourcesJSON),
-	}
-	var resp responseBase
-	return gc.brdg.RPC(ctx, rpcUpdateContainer, &req, &resp, false)
 }
 
 // Close terminates the guest connection. It is undefined to call any other
