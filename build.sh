@@ -17,6 +17,7 @@ go build github.com/Microsoft/hcsshim/cmd/runhcs
 go build github.com/Microsoft/hcsshim/cmd/shimdiag
 go build github.com/Microsoft/hcsshim/cmd/tar2ext4
 go build github.com/Microsoft/hcsshim/cmd/device-util
+go build github.com/Microsoft/hcsshim/cmd/jobobject-util
 GOOS=linux go build -buildmode=pie github.com/Microsoft/hcsshim/cmd/tar2ext4
 go build github.com/Microsoft/hcsshim/internal/tools/zapdir
 go build github.com/Microsoft/hcsshim/internal/tools/grantvmgroupaccess
