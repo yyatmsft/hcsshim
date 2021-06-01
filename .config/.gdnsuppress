@@ -1,0 +1,54 @@
+{
+  "version": "latest",
+  "suppressionSets": {
+    "default": {
+      "name": "default",
+      "createdDate": "2021-06-18 22:27:56Z",
+      "lastUpdatedDate": "2021-06-18 22:27:56Z"
+    }
+  },
+  "results": {
+    "1569f6b8a8833821cd1753e6bffb9ed0b3e0e20b55af7a45c1c6f967b893ec4c": {
+      "signature": "1569f6b8a8833821cd1753e6bffb9ed0b3e0e20b55af7a45c1c6f967b893ec4c",
+      "alternativeSignatures": [],
+      "target": "vendor/google.golang.org/grpc/README.md",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "policheck",
+      "ruleId": "79569",
+      "justification": "Not managed by Microsoft.",
+      "createdDate": "2021-06-18 22:27:56Z",
+      "expirationDate": null,
+      "type": null
+    },
+    "874f59e712cfd9f6fae750452a2aa2bce8a39607ffadca2ea9a8f421bf0dd6f9": {
+      "signature": "874f59e712cfd9f6fae750452a2aa2bce8a39607ffadca2ea9a8f421bf0dd6f9",
+      "alternativeSignatures": [],
+      "target": "vendor/github.com/google/go-containerregistry/pkg/authn/README.md",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "credscan",
+      "ruleId": "CSCAN-GENERAL0060",
+      "justification": "This is a false positive and not managed by Microsoft.",
+      "createdDate": "2021-06-18 22:27:56Z",
+      "expirationDate": null,
+      "type": null
+    },
+    "4a2e56d07b30fd116c01b2d33cbdc25bb802fec8dfbf93ba59ad838da9450136": {
+      "signature": "4a2e56d07b30fd116c01b2d33cbdc25bb802fec8dfbf93ba59ad838da9450136",
+      "alternativeSignatures": [],
+      "target": "vendor/github.com/google/go-containerregistry/pkg/authn/README.md",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "credscan",
+      "ruleId": "CSCAN-GENERAL0060",
+      "justification": "This is a false positive and not managed by Microsoft.",
+      "createdDate": "2021-06-18 22:27:56Z",
+      "expirationDate": null,
+      "type": null
+    }
+  }
+}

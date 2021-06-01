@@ -1,0 +1,89 @@
+# Build stages shared between Official and Buddy builds.
+# The parent template must include ContainerPlatform/ContainerPlatform repository with "cplat" alias
+
+stages:
+  - stage: build_repo
+    jobs:
+
+      - template: .pipelines/templates/build/version.yml@cplat
+
+      - job: build
+        pool:
+          type: linux
+        variables:
+          ob_outputDirectory: '$(Build.StagingDirectory)'
+        steps:
+          - script: |
+              set -eux
+
+              mkdir -p $OUT_DIR
+
+              go build -o $OUT_DIR github.com/Microsoft/hcsshim/cmd/containerd-shim-runhcs-v1
+              go build -o $OUT_DIR github.com/Microsoft/hcsshim/cmd/runhcs
+              go build -o $OUT_DIR github.com/Microsoft/hcsshim/cmd/shimdiag
+              go build -o $OUT_DIR github.com/Microsoft/hcsshim/cmd/tar2ext4
+              go build -o $OUT_DIR github.com/Microsoft/hcsshim/cmd/device-util
+              go build -o $OUT_DIR github.com/Microsoft/hcsshim/cmd/jobobject-util
+              go build -o $OUT_DIR github.com/Microsoft/hcsshim/internal/tools/zapdir
+              go build -o $OUT_DIR github.com/Microsoft/hcsshim/internal/tools/grantvmgroupaccess
+
+              GOOS=linux go build -buildmode=pie github.com/Microsoft/hcsshim/cmd/tar2ext4
+
+              cd test
+              go test -c github.com/Microsoft/hcsshim/test/cri-containerd --tags functional
+              go build -o sample-logging-driver.exe cri-containerd/helpers/log.go
+              mv ./cri-containerd.test.exe $OUT_DIR
+              mv ./sample-logging-driver.exe $OUT_DIR
+              cd ..
+            env:
+              GOPROXY: off
+              GOFLAGS: -mod=vendor
+              GOOS: windows
+              OUT_DIR: '$(Build.StagingDirectory)/out'
+            displayName: build hcsshim binaries
+
+          - script: |
+              set -eoux
+
+              make out/delta.tar.gz CC=musl-gcc # First make the linux gcs bits
+              cp out/delta.tar.gz $OUT_DIR
+              cp hack/catcpio.sh $OUT_DIR
+            env:
+              GOPROXY: off
+              GOFLAGS: -mod=vendor
+              GOOS: linux
+              OUT_DIR: '$(Build.StagingDirectory)/out'
+            displayName: build opengcs
+
+          - template: .pipelines/templates/build/go-licenses.yml@cplat
+            parameters:
+              outputDirectory: '$(Agent.TempDirectory)/windows-notices'
+              components:
+                - github.com/Microsoft/hcsshim/cmd/containerd-shim-runhcs-v1
+                - github.com/Microsoft/hcsshim/cmd/runhcs
+                - github.com/Microsoft/hcsshim/cmd/shimdiag
+                - github.com/Microsoft/hcsshim/cmd/tar2ext4
+                - github.com/Microsoft/hcsshim/cmd/device-util
+                - github.com/Microsoft/hcsshim/cmd/jobobject-util
+                - github.com/Microsoft/hcsshim/internal/tools/zapdir
+                - github.com/Microsoft/hcsshim/internal/tools/grantvmgroupaccess
+
+          - template: .pipelines/templates/build/go-licenses.yml@cplat
+            parameters:
+              outputDirectory: '$(Agent.TempDirectory)/linux-notices'
+              targetOS: linux
+              components:
+                - github.com/Microsoft/hcsshim/cmd/tar2ext4
+                - github.com/Microsoft/hcsshim/cmd/gcs
+                - github.com/Microsoft/hcsshim/cmd/gcstools
+
+          - template: .pipelines/templates/build/combine-go-licenses.yml@cplat
+            parameters:
+              outputDirectory: '$(Build.StagingDirectory)/out/notices'
+              inputDirectories:
+                - '$(Agent.TempDirectory)/windows-notices'
+                - '$(Agent.TempDirectory)/linux-notices'
+
+      - template: .pipelines/templates/build/sign.yml@cplat
+        parameters:
+          parentJob: build
