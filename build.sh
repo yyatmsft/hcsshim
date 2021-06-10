@@ -5,12 +5,16 @@
 BASH_XTRACEFD=1
 set -eux
 
-export GOOS=windows
 export GOPROXY=off         # Prohibit downloads
 export GOFLAGS=-mod=vendor # Build using vendor directory
 
 mkdir -p /source/cdpx-artifacts
 cd /source/cdpx-artifacts
+make -f ../Makefile out/delta.tar.gz CC=musl-gcc # First make the Linux gcs bits
+cp out/delta.tar.gz .
+cp ../hack/catcpio.sh .
+
+export GOOS=windows # Now build the Windows bits below
 
 go build github.com/Microsoft/hcsshim/cmd/containerd-shim-runhcs-v1
 go build github.com/Microsoft/hcsshim/cmd/runhcs
