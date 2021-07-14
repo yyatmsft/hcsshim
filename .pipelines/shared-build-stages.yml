@@ -27,7 +27,7 @@ stages:
               go build -o $OUT_DIR github.com/Microsoft/hcsshim/internal/tools/zapdir
               go build -o $OUT_DIR github.com/Microsoft/hcsshim/internal/tools/grantvmgroupaccess
 
-              GOOS=linux go build -buildmode=pie github.com/Microsoft/hcsshim/cmd/tar2ext4
+              GOOS=linux go build -buildmode=pie -o $OUT_DIR github.com/Microsoft/hcsshim/cmd/tar2ext4
 
               cd test
               go test -c github.com/Microsoft/hcsshim/test/cri-containerd --tags functional
