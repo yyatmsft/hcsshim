@@ -16,7 +16,14 @@ import (
 // since the container path is already the scratch path. For linux, the GCS unions
 // the specified layers and ScratchPath together, placing the resulting union
 // filesystem at ContainerRootPath.
-type CombinedLayers struct {
+type LCOWCombinedLayers struct {
+	ContainerID       string            `jason:"ContainerID"`
+	ContainerRootPath string            `json:"ContainerRootPath,omitempty"`
+	Layers            []hcsschema.Layer `json:"Layers,omitempty"`
+	ScratchPath       string            `json:"ScratchPath,omitempty"`
+}
+
+type WCOWCombinedLayers struct {
 	ContainerRootPath string            `json:"ContainerRootPath,omitempty"`
 	Layers            []hcsschema.Layer `json:"Layers,omitempty"`
 	ScratchPath       string            `json:"ScratchPath,omitempty"`
@@ -45,10 +52,37 @@ type LCOWMappedDirectory struct {
 	ReadOnly  bool   `json:"ReadOnly,omitempty"`
 }
 
+// LCOWMappedLayer is one of potentially multiple read-only layers mapped on a VPMem device
+type LCOWMappedLayer struct {
+	DeviceOffsetInBytes uint64 `json:"DeviceOffsetInBytes,omitempty"`
+	DeviceSizeInBytes   uint64 `json:"DeviceSizeInBytes,omitempty"`
+}
+
+// DeviceVerityInfo represents dm-verity metadata of a block device.
+// Most of the fields can be directly mapped to table entries https://www.kernel.org/doc/html/latest/admin-guide/device-mapper/verity.html
+type DeviceVerityInfo struct {
+	// Ext4SizeInBytes is the size of ext4 file system
+	Ext4SizeInBytes int64 `json:",omitempty"`
+	// Version is the on-disk hash format
+	Version int `json:",omitempty"`
+	// Algorithm is the algo used to produce the hashes for dm-verity hash tree
+	Algorithm string `json:",omitempty"`
+	// SuperBlock is set to true if dm-verity super block is present on the device
+	SuperBlock bool `json:",omitempty"`
+	// RootDigest is the root hash of the dm-verity hash tree
+	RootDigest string `json:",omitempty"`
+	// Salt is the salt used to compute the root hash
+	Salt string `json:",omitempty"`
+	// BlockSize is the data device block size
+	BlockSize int `json:",omitempty"`
+}
+
 // Read-only layers over VPMem
 type LCOWMappedVPMemDevice struct {
-	DeviceNumber uint32 `json:"DeviceNumber,omitempty"`
-	MountPath    string `json:"MountPath,omitempty"`
+	DeviceNumber uint32            `json:"DeviceNumber,omitempty"`
+	MountPath    string            `json:"MountPath,omitempty"`
+	MappingInfo  *LCOWMappedLayer  `json:"MappingInfo,omitempty"`
+	VerityInfo   *DeviceVerityInfo `json:"VerityInfo,omitempty"`
 }
 
 type LCOWMappedVPCIDevice struct {
@@ -86,6 +120,7 @@ const (
 	ResourceTypeVPCIDevice           ResourceType = "VPCIDevice"
 	ResourceTypeContainerConstraints ResourceType = "ContainerConstraints"
 	ResourceTypeHvSocket             ResourceType = "HvSocket"
+	ResourceTypeSecurityPolicy       ResourceType = "SecurityPolicy"
 )
 
 // GuestRequest is for modify commands passed to the guest.

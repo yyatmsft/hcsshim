@@ -2,63 +2,229 @@ package uvm
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 
+	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
+
+	"github.com/Microsoft/hcsshim/ext4/dmverity"
+	"github.com/Microsoft/hcsshim/ext4/tar2ext4"
 	"github.com/Microsoft/hcsshim/internal/guestrequest"
 	"github.com/Microsoft/hcsshim/internal/hcs/resourcepaths"
 	hcsschema "github.com/Microsoft/hcsshim/internal/hcs/schema2"
 	"github.com/Microsoft/hcsshim/internal/log"
 	"github.com/Microsoft/hcsshim/internal/requesttype"
-	"github.com/sirupsen/logrus"
 )
 
 const (
-	lcowVPMEMLayerFmt = "/run/layers/p%d"
+	lcowDefaultVPMemLayerFmt = "/run/layers/p%d"
 )
 
 var (
-	// ErrMaxVPMEMLayerSize is the error returned when the size of `hostPath` is
-	// greater than the max vPMEM layer size set at create time.
-	ErrMaxVPMEMLayerSize = errors.New("layer size is to large for VPMEM max size")
+	// ErrMaxVPMemLayerSize is the error returned when the size of `hostPath` is
+	// greater than the max vPMem layer size set at create time.
+	ErrMaxVPMemLayerSize = errors.New("layer size is to large for VPMEM max size")
 )
 
-// findNextVPMEM finds the next available VPMem slot.
+type vPMemInfoDefault struct {
+	hostPath string
+	uvmPath  string
+	refCount uint32
+}
+
+func newDefaultVPMemInfo(hostPath, uvmPath string) *vPMemInfoDefault {
+	return &vPMemInfoDefault{
+		hostPath: hostPath,
+		uvmPath:  uvmPath,
+		refCount: 1,
+	}
+}
+
+// readVeritySuperBlock reads ext4 super block for a given VHD to then further read the dm-verity super block
+// and root hash
+func readVeritySuperBlock(ctx context.Context, layerPath string) (*guestrequest.DeviceVerityInfo, error) {
+	ext4sb, err := tar2ext4.ReadExt4SuperBlock(layerPath)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to read ext4 super block")
+	}
+	// Calculate the size of ext4 file system based on the information from ext4 super block, since
+	// the dm-verity information is expected to be appended, the size of ext4 data will be the offset
+	// of the dm-verity super block, followed by merkle hash tree
+	ext4BlockSize := 1024 * (1 << ext4sb.LogBlockSize)
+	ext4SizeInBytes := int64(ext4BlockSize) * int64(ext4sb.BlocksCountLow)
+	dmvsb, err := dmverity.ReadDMVerityInfo(layerPath, ext4SizeInBytes)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to read dm-verity super block")
+	}
+	log.G(ctx).WithFields(logrus.Fields{
+		"layerPath":     layerPath,
+		"rootHash":      dmvsb.RootDigest,
+		"algorithm":     dmvsb.Algorithm,
+		"salt":          dmvsb.Salt,
+		"dataBlocks":    dmvsb.DataBlocks,
+		"dataBlockSize": dmvsb.DataBlockSize,
+	}).Debug("dm-verity information")
+
+	return &guestrequest.DeviceVerityInfo{
+		Ext4SizeInBytes: ext4SizeInBytes,
+		BlockSize:       ext4BlockSize,
+		RootDigest:      dmvsb.RootDigest,
+		Algorithm:       dmvsb.Algorithm,
+		Salt:            dmvsb.Salt,
+		Version:         int(dmvsb.Version),
+		SuperBlock:      true,
+	}, nil
+}
+
+// findNextVPMemSlot finds next available VPMem slot.
 //
-// The lock MUST be held when calling this function.
-func (uvm *UtilityVM) findNextVPMEM(ctx context.Context, hostPath string) (uint32, error) {
+// Lock MUST be held when calling this function.
+func (uvm *UtilityVM) findNextVPMemSlot(ctx context.Context, hostPath string) (uint32, error) {
 	for i := uint32(0); i < uvm.vpmemMaxCount; i++ {
-		if uvm.vpmemDevices[i] == nil {
+		if uvm.vpmemDevicesDefault[i] == nil {
 			log.G(ctx).WithFields(logrus.Fields{
 				"hostPath":     hostPath,
 				"deviceNumber": i,
-			}).Debug("allocated VPMEM location")
+			}).Debug("allocated VPMem location")
 			return i, nil
 		}
 	}
 	return 0, ErrNoAvailableLocation
 }
 
-// Lock must be held when calling this function
-func (uvm *UtilityVM) findVPMEMDevice(ctx context.Context, findThisHostPath string) (uint32, error) {
+// findVPMemSlot looks up `findThisHostPath` in already mounted VPMem devices
+//
+// Lock MUST be held when calling this function
+func (uvm *UtilityVM) findVPMemSlot(ctx context.Context, findThisHostPath string) (uint32, error) {
 	for i := uint32(0); i < uvm.vpmemMaxCount; i++ {
-		if vi := uvm.vpmemDevices[i]; vi != nil && vi.hostPath == findThisHostPath {
+		if vi := uvm.vpmemDevicesDefault[i]; vi != nil && vi.hostPath == findThisHostPath {
 			log.G(ctx).WithFields(logrus.Fields{
 				"hostPath":     vi.hostPath,
 				"uvmPath":      vi.uvmPath,
 				"refCount":     vi.refCount,
 				"deviceNumber": i,
-			}).Debug("found VPMEM location")
+			}).Debug("found VPMem location")
 			return i, nil
 		}
 	}
 	return 0, ErrNotAttached
 }
 
-// AddVPMEM adds a VPMEM disk to a utility VM at the next available location and
+// addVPMemDefault adds a VPMem disk to a utility VM at the next available location and
 // returns the UVM path where the layer was mounted.
-func (uvm *UtilityVM) AddVPMEM(ctx context.Context, hostPath string) (_ string, err error) {
+func (uvm *UtilityVM) addVPMemDefault(ctx context.Context, hostPath string) (_ string, err error) {
+	if devNumber, err := uvm.findVPMemSlot(ctx, hostPath); err == nil {
+		device := uvm.vpmemDevicesDefault[devNumber]
+		device.refCount++
+		return device.uvmPath, nil
+	}
+
+	fi, err := os.Stat(hostPath)
+	if err != nil {
+		return "", err
+	}
+	if uint64(fi.Size()) > uvm.vpmemMaxSizeBytes {
+		return "", ErrMaxVPMemLayerSize
+	}
+
+	deviceNumber, err := uvm.findNextVPMemSlot(ctx, hostPath)
+	if err != nil {
+		return "", err
+	}
+
+	modification := &hcsschema.ModifySettingRequest{
+		RequestType: requesttype.Add,
+		Settings: hcsschema.VirtualPMemDevice{
+			HostPath:    hostPath,
+			ReadOnly:    true,
+			ImageFormat: "Vhd1",
+		},
+		ResourcePath: fmt.Sprintf(resourcepaths.VPMemControllerResourceFormat, deviceNumber),
+	}
+
+	uvmPath := fmt.Sprintf(lcowDefaultVPMemLayerFmt, deviceNumber)
+	guestSettings := guestrequest.LCOWMappedVPMemDevice{
+		DeviceNumber: deviceNumber,
+		MountPath:    uvmPath,
+	}
+	if v, iErr := readVeritySuperBlock(ctx, hostPath); iErr != nil {
+		log.G(ctx).WithError(iErr).WithField("hostPath", hostPath).Debug("unable to read dm-verity information from VHD")
+	} else {
+		if v != nil {
+			log.G(ctx).WithFields(logrus.Fields{
+				"hostPath":   hostPath,
+				"rootDigest": v.RootDigest,
+			}).Debug("adding VPMem with dm-verity")
+		}
+		guestSettings.VerityInfo = v
+	}
+
+	modification.GuestRequest = guestrequest.GuestRequest{
+		ResourceType: guestrequest.ResourceTypeVPMemDevice,
+		RequestType:  requesttype.Add,
+		Settings:     guestSettings,
+	}
+
+	if err := uvm.modify(ctx, modification); err != nil {
+		return "", errors.Errorf("uvm::addVPMemDefault: failed to modify utility VM configuration: %s", err)
+	}
+
+	uvm.vpmemDevicesDefault[deviceNumber] = newDefaultVPMemInfo(hostPath, uvmPath)
+	return uvmPath, nil
+}
+
+// removeVPMemDefault removes a VPMem disk from a Utility VM. If the `hostPath` is not
+// attached returns `ErrNotAttached`.
+func (uvm *UtilityVM) removeVPMemDefault(ctx context.Context, hostPath string) error {
+	deviceNumber, err := uvm.findVPMemSlot(ctx, hostPath)
+	if err != nil {
+		return err
+	}
+
+	device := uvm.vpmemDevicesDefault[deviceNumber]
+	if device.refCount > 1 {
+		device.refCount--
+		return nil
+	}
+
+	var verity *guestrequest.DeviceVerityInfo
+	if v, _ := readVeritySuperBlock(ctx, hostPath); v != nil {
+		log.G(ctx).WithFields(logrus.Fields{
+			"hostPath":   hostPath,
+			"rootDigest": v.RootDigest,
+		}).Debug("removing VPMem with dm-verity")
+		verity = v
+	}
+	modification := &hcsschema.ModifySettingRequest{
+		RequestType:  requesttype.Remove,
+		ResourcePath: fmt.Sprintf(resourcepaths.VPMemControllerResourceFormat, deviceNumber),
+		GuestRequest: guestrequest.GuestRequest{
+			ResourceType: guestrequest.ResourceTypeVPMemDevice,
+			RequestType:  requesttype.Remove,
+			Settings: guestrequest.LCOWMappedVPMemDevice{
+				DeviceNumber: deviceNumber,
+				MountPath:    device.uvmPath,
+				VerityInfo:   verity,
+			},
+		},
+	}
+	if err := uvm.modify(ctx, modification); err != nil {
+		return errors.Errorf("failed to remove VPMEM %s from utility VM %s: %s", hostPath, uvm.id, err)
+	}
+	log.G(ctx).WithFields(logrus.Fields{
+		"hostPath":     device.hostPath,
+		"uvmPath":      device.uvmPath,
+		"refCount":     device.refCount,
+		"deviceNumber": deviceNumber,
+	}).Debug("removed VPMEM location")
+
+	uvm.vpmemDevicesDefault[deviceNumber] = nil
+
+	return nil
+}
+
+func (uvm *UtilityVM) AddVPMem(ctx context.Context, hostPath string) (string, error) {
 	if uvm.operatingSystem != "linux" {
 		return "", errNotSupported
 	}
@@ -66,63 +232,13 @@ func (uvm *UtilityVM) AddVPMEM(ctx context.Context, hostPath string) (_ string, 
 	uvm.m.Lock()
 	defer uvm.m.Unlock()
 
-	var deviceNumber uint32
-	deviceNumber, err = uvm.findVPMEMDevice(ctx, hostPath)
-	if err != nil {
-		// We are going to add it so make sure it fits on vPMEM
-		fi, err := os.Stat(hostPath)
-		if err != nil {
-			return "", err
-		}
-		if uint64(fi.Size()) > uvm.vpmemMaxSizeBytes {
-			return "", ErrMaxVPMEMLayerSize
-		}
-
-		// It doesn't exist, so we're going to allocate and hot-add it
-		deviceNumber, err = uvm.findNextVPMEM(ctx, hostPath)
-		if err != nil {
-			return "", err
-		}
-
-		modification := &hcsschema.ModifySettingRequest{
-			RequestType: requesttype.Add,
-			Settings: hcsschema.VirtualPMemDevice{
-				HostPath:    hostPath,
-				ReadOnly:    true,
-				ImageFormat: "Vhd1",
-			},
-			ResourcePath: fmt.Sprintf(resourcepaths.VPMemControllerResourceFormat, deviceNumber),
-		}
-
-		uvmPath := fmt.Sprintf(lcowVPMEMLayerFmt, deviceNumber)
-		modification.GuestRequest = guestrequest.GuestRequest{
-			ResourceType: guestrequest.ResourceTypeVPMemDevice,
-			RequestType:  requesttype.Add,
-			Settings: guestrequest.LCOWMappedVPMemDevice{
-				DeviceNumber: deviceNumber,
-				MountPath:    uvmPath,
-			},
-		}
-
-		if err := uvm.modify(ctx, modification); err != nil {
-			return "", fmt.Errorf("uvm::AddVPMEM: failed to modify utility VM configuration: %s", err)
-		}
-
-		uvm.vpmemDevices[deviceNumber] = &vpmemInfo{
-			hostPath: hostPath,
-			uvmPath:  uvmPath,
-			refCount: 1,
-		}
-		return uvmPath, nil
+	if uvm.vpmemMultiMapping {
+		return uvm.addVPMemMappedDevice(ctx, hostPath)
 	}
-	device := uvm.vpmemDevices[deviceNumber]
-	device.refCount++
-	return device.uvmPath, nil
+	return uvm.addVPMemDefault(ctx, hostPath)
 }
 
-// RemoveVPMEM removes a VPMEM disk from a Utility VM. If the `hostPath` is not
-// attached returns `ErrNotAttached`.
-func (uvm *UtilityVM) RemoveVPMEM(ctx context.Context, hostPath string) (err error) {
+func (uvm *UtilityVM) RemoveVPMem(ctx context.Context, hostPath string) error {
 	if uvm.operatingSystem != "linux" {
 		return errNotSupported
 	}
@@ -130,38 +246,8 @@ func (uvm *UtilityVM) RemoveVPMEM(ctx context.Context, hostPath string) (err err
 	uvm.m.Lock()
 	defer uvm.m.Unlock()
 
-	deviceNumber, err := uvm.findVPMEMDevice(ctx, hostPath)
-	if err != nil {
-		return err
+	if uvm.vpmemMultiMapping {
+		return uvm.removeVPMemMappedDevice(ctx, hostPath)
 	}
-
-	device := uvm.vpmemDevices[deviceNumber]
-	if device.refCount == 1 {
-		modification := &hcsschema.ModifySettingRequest{
-			RequestType:  requesttype.Remove,
-			ResourcePath: fmt.Sprintf(resourcepaths.VPMemControllerResourceFormat, deviceNumber),
-			GuestRequest: guestrequest.GuestRequest{
-				ResourceType: guestrequest.ResourceTypeVPMemDevice,
-				RequestType:  requesttype.Remove,
-				Settings: guestrequest.LCOWMappedVPMemDevice{
-					DeviceNumber: deviceNumber,
-					MountPath:    device.uvmPath,
-				},
-			},
-		}
-
-		if err := uvm.modify(ctx, modification); err != nil {
-			return fmt.Errorf("failed to remove VPMEM %s from utility VM %s: %s", hostPath, uvm.id, err)
-		}
-		log.G(ctx).WithFields(logrus.Fields{
-			"hostPath":     device.hostPath,
-			"uvmPath":      device.uvmPath,
-			"refCount":     device.refCount,
-			"deviceNumber": deviceNumber,
-		}).Debug("removed VPMEM location")
-		uvm.vpmemDevices[deviceNumber] = nil
-	} else {
-		device.refCount--
-	}
-	return nil
+	return uvm.removeVPMemDefault(ctx, hostPath)
 }

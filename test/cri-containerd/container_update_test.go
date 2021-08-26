@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/Microsoft/hcsshim/internal/oci"
 	"github.com/Microsoft/hcsshim/osversion"
 	testutilities "github.com/Microsoft/hcsshim/test/functional/utilities"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
@@ -42,7 +43,7 @@ func Test_Container_UpdateResources_CPUShare(t *testing.T) {
 	tests := []config{
 		{
 			name:             "WCOW_Process",
-			requiredFeatures: []string{featureWCOWProcess},
+			requiredFeatures: []string{featureWCOWProcess, featureCRIUpdateContainer},
 			runtimeHandler:   wcowProcessRuntimeHandler,
 			sandboxImage:     imageWindowsNanoserver,
 			containerImage:   imageWindowsNanoserver,
@@ -50,7 +51,7 @@ func Test_Container_UpdateResources_CPUShare(t *testing.T) {
 		},
 		{
 			name:             "WCOW_Hypervisor",
-			requiredFeatures: []string{featureWCOWHypervisor},
+			requiredFeatures: []string{featureWCOWHypervisor, featureCRIUpdateContainer},
 			runtimeHandler:   wcowHypervisorRuntimeHandler,
 			sandboxImage:     imageWindowsNanoserver,
 			containerImage:   imageWindowsNanoserver,
@@ -58,7 +59,7 @@ func Test_Container_UpdateResources_CPUShare(t *testing.T) {
 		},
 		{
 			name:             "LCOW",
-			requiredFeatures: []string{featureLCOW},
+			requiredFeatures: []string{featureLCOW, featureCRIUpdateContainer},
 			runtimeHandler:   lcowRuntimeHandler,
 			sandboxImage:     imageLcowK8sPause,
 			containerImage:   imageLcowAlpine,
@@ -157,7 +158,7 @@ func Test_Container_UpdateResources_CPUShare_NotRunning(t *testing.T) {
 	tests := []config{
 		{
 			name:             "WCOW_Process",
-			requiredFeatures: []string{featureWCOWProcess},
+			requiredFeatures: []string{featureWCOWProcess, featureCRIUpdateContainer},
 			runtimeHandler:   wcowProcessRuntimeHandler,
 			sandboxImage:     imageWindowsNanoserver,
 			containerImage:   imageWindowsNanoserver,
@@ -165,7 +166,7 @@ func Test_Container_UpdateResources_CPUShare_NotRunning(t *testing.T) {
 		},
 		{
 			name:             "WCOW_Hypervisor",
-			requiredFeatures: []string{featureWCOWHypervisor},
+			requiredFeatures: []string{featureWCOWHypervisor, featureCRIUpdateContainer},
 			runtimeHandler:   wcowHypervisorRuntimeHandler,
 			sandboxImage:     imageWindowsNanoserver,
 			containerImage:   imageWindowsNanoserver,
@@ -173,7 +174,7 @@ func Test_Container_UpdateResources_CPUShare_NotRunning(t *testing.T) {
 		},
 		{
 			name:             "LCOW",
-			requiredFeatures: []string{featureLCOW},
+			requiredFeatures: []string{featureLCOW, featureCRIUpdateContainer},
 			runtimeHandler:   lcowRuntimeHandler,
 			sandboxImage:     imageLcowK8sPause,
 			containerImage:   imageLcowAlpine,
@@ -272,7 +273,7 @@ func Test_Container_UpdateResources_Memory(t *testing.T) {
 	tests := []config{
 		{
 			name:             "WCOW_Process",
-			requiredFeatures: []string{featureWCOWProcess},
+			requiredFeatures: []string{featureWCOWProcess, featureCRIUpdateContainer},
 			runtimeHandler:   wcowProcessRuntimeHandler,
 			sandboxImage:     imageWindowsNanoserver,
 			containerImage:   imageWindowsNanoserver,
@@ -280,7 +281,7 @@ func Test_Container_UpdateResources_Memory(t *testing.T) {
 		},
 		{
 			name:             "WCOW_Hypervisor",
-			requiredFeatures: []string{featureWCOWHypervisor},
+			requiredFeatures: []string{featureWCOWHypervisor, featureCRIUpdateContainer},
 			runtimeHandler:   wcowHypervisorRuntimeHandler,
 			sandboxImage:     imageWindowsNanoserver,
 			containerImage:   imageWindowsNanoserver,
@@ -288,7 +289,7 @@ func Test_Container_UpdateResources_Memory(t *testing.T) {
 		},
 		{
 			name:             "LCOW",
-			requiredFeatures: []string{featureLCOW},
+			requiredFeatures: []string{featureLCOW, featureCRIUpdateContainer},
 			runtimeHandler:   lcowRuntimeHandler,
 			sandboxImage:     imageLcowK8sPause,
 			containerImage:   imageLcowAlpine,
@@ -335,7 +336,7 @@ func Test_Container_UpdateResources_Memory(t *testing.T) {
 					},
 					Command: test.cmd,
 					Annotations: map[string]string{
-						"io.microsoft.container.memory.sizeinmb": fmt.Sprintf("%d", startingMemorySize), // 768MB
+						oci.AnnotationContainerMemorySizeInMB: fmt.Sprintf("%d", startingMemorySize), // 768MB
 					},
 				},
 				PodSandboxId:  podID,

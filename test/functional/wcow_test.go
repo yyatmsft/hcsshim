@@ -380,17 +380,18 @@ func TestWCOWArgonShim(t *testing.T) {
 	// For cleanup on failure
 	defer func() {
 		if argonShimMounted {
-			layerspkg.UnmountContainerLayers(context.Background(), append(imageLayers, argonShimScratchDir), "", nil, layerspkg.UnmountOperationAll)
+			layerspkg.UnmountContainerLayers(context.Background(), append(imageLayers, argonShimScratchDir), "", "", nil, layerspkg.UnmountOperationAll)
 		}
 	}()
 
+	id := "argon"
 	// This is a cheat but stops us re-writing exactly the same code just for test
-	argonShimLocalMountPath, err := layerspkg.MountContainerLayers(context.Background(), append(imageLayers, argonShimScratchDir), "", nil)
+	argonShimLocalMountPath, err := layerspkg.MountContainerLayers(context.Background(), id, append(imageLayers, argonShimScratchDir), "", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	argonShimMounted = true
-	argonShim, err := hcsshim.CreateContainer("argon", &hcsshim.ContainerConfig{
+	argonShim, err := hcsshim.CreateContainer(id, &hcsshim.ContainerConfig{
 		SystemType:      "Container",
 		Name:            "argonShim",
 		VolumePath:      argonShimLocalMountPath,
@@ -418,7 +419,7 @@ func TestWCOWArgonShim(t *testing.T) {
 	}
 	runShimCommands(t, argonShim)
 	stopContainer(t, argonShim)
-	if err := layerspkg.UnmountContainerLayers(context.Background(), append(imageLayers, argonShimScratchDir), "", nil, layerspkg.UnmountOperationAll); err != nil {
+	if err := layerspkg.UnmountContainerLayers(context.Background(), append(imageLayers, argonShimScratchDir), "", "", nil, layerspkg.UnmountOperationAll); err != nil {
 		t.Fatal(err)
 	}
 	argonShimMounted = false

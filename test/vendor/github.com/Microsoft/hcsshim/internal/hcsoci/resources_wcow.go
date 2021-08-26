@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/Microsoft/hcsshim/internal/credentials"
+	"github.com/Microsoft/hcsshim/internal/devices"
 	"github.com/Microsoft/hcsshim/internal/layers"
 	"github.com/Microsoft/hcsshim/internal/log"
 	"github.com/Microsoft/hcsshim/internal/resources"
@@ -52,12 +53,12 @@ func allocateWindowsResources(ctx context.Context, coi *createOptionsInternal, r
 	if coi.Spec.Root.Path == "" && (coi.HostingSystem != nil || coi.Spec.Windows.HyperV == nil) {
 		log.G(ctx).Debug("hcsshim::allocateWindowsResources mounting storage")
 		containerRootInUVM := r.ContainerRootInUVM()
-		containerRootPath, err := layers.MountContainerLayers(ctx, coi.Spec.Windows.LayerFolders, containerRootInUVM, coi.HostingSystem)
+		containerRootPath, err := layers.MountContainerLayers(ctx, coi.actualID, coi.Spec.Windows.LayerFolders, containerRootInUVM, "", coi.HostingSystem)
 		if err != nil {
 			return errors.Wrap(err, "failed to mount container storage")
 		}
 		coi.Spec.Root.Path = containerRootPath
-		layers := layers.NewImageLayers(coi.HostingSystem, containerRootInUVM, coi.Spec.Windows.LayerFolders, isSandbox)
+		layers := layers.NewImageLayers(coi.HostingSystem, containerRootInUVM, coi.Spec.Windows.LayerFolders, "", isSandbox)
 		r.SetLayers(layers)
 	}
 
@@ -102,6 +103,21 @@ func allocateWindowsResources(ctx context.Context, coi *createOptionsInternal, r
 		coi.Spec.Windows.Devices = windowsDevices
 	}
 
+	if coi.HostingSystem != nil {
+		// get the spec specified kernel drivers and install them on the UVM
+		drivers, err := getAssignedDeviceKernelDrivers(coi.Spec.Annotations)
+		if err != nil {
+			return err
+		}
+		for _, d := range drivers {
+			driverCloser, err := devices.InstallWindowsDriver(ctx, coi.HostingSystem, d)
+			if err != nil {
+				return err
+			}
+			r.Add(driverCloser)
+		}
+	}
+
 	return nil
 }
 
@@ -119,6 +135,7 @@ func setupMounts(ctx context.Context, coi *createOptionsInternal, r *resources.R
 		case "":
 		case "physical-disk":
 		case "virtual-disk":
+		case "extensible-virtual-disk":
 		default:
 			return fmt.Errorf("invalid OCI spec - Type '%s' not supported", mount.Type)
 		}
@@ -145,6 +162,13 @@ func setupMounts(ctx context.Context, coi *createOptionsInternal, r *resources.R
 				scsiMount, err := coi.HostingSystem.AddSCSI(ctx, mount.Source, uvmPath, readOnly, mount.Options, uvm.VMAccessTypeIndividual)
 				if err != nil {
 					return errors.Wrapf(err, "adding SCSI virtual disk mount %+v", mount)
+				}
+				r.Add(scsiMount)
+			} else if mount.Type == "extensible-virtual-disk" {
+				l.Debug("hcsshim::allocateWindowsResource Hot-adding ExtensibleVirtualDisk")
+				scsiMount, err := coi.HostingSystem.AddSCSIExtensibleVirtualDisk(ctx, mount.Source, uvmPath, readOnly)
+				if err != nil {
+					return errors.Wrapf(err, "adding SCSI EVD mount failed %+v", mount)
 				}
 				r.Add(scsiMount)
 			} else {

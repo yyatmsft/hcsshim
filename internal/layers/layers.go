@@ -6,9 +6,12 @@ package layers
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
+	"time"
 
 	hcsschema "github.com/Microsoft/hcsshim/internal/hcs/schema2"
+	"github.com/Microsoft/hcsshim/internal/hcserror"
 	"github.com/Microsoft/hcsshim/internal/log"
 	"github.com/Microsoft/hcsshim/internal/ospath"
 	"github.com/Microsoft/hcsshim/internal/uvm"
@@ -16,12 +19,14 @@ import (
 	"github.com/Microsoft/hcsshim/internal/wclayer"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
+	"golang.org/x/sys/windows"
 )
 
 // ImageLayers contains all the layers for an image.
 type ImageLayers struct {
 	vm                 *uvm.UtilityVM
 	containerRootInUVM string
+	volumeMountPath    string
 	layers             []string
 	// In some instances we may want to avoid cleaning up the image layers, such as when tearing
 	// down a sandbox container since the UVM will be torn down shortly after and the resources
@@ -29,11 +34,12 @@ type ImageLayers struct {
 	skipCleanup bool
 }
 
-func NewImageLayers(vm *uvm.UtilityVM, containerRootInUVM string, layers []string, skipCleanup bool) *ImageLayers {
+func NewImageLayers(vm *uvm.UtilityVM, containerRootInUVM string, layers []string, volumeMountPath string, skipCleanup bool) *ImageLayers {
 	return &ImageLayers{
 		vm:                 vm,
 		containerRootInUVM: containerRootInUVM,
 		layers:             layers,
+		volumeMountPath:    volumeMountPath,
 		skipCleanup:        skipCleanup,
 	}
 }
@@ -51,7 +57,7 @@ func (layers *ImageLayers) Release(ctx context.Context, all bool) error {
 	if layers.vm != nil {
 		crp = containerRootfsPath(layers.vm, layers.containerRootInUVM)
 	}
-	err := UnmountContainerLayers(ctx, layers.layers, crp, layers.vm, op)
+	err := UnmountContainerLayers(ctx, layers.layers, crp, layers.volumeMountPath, layers.vm, op)
 	if err != nil {
 		return err
 	}
@@ -67,9 +73,12 @@ func (layers *ImageLayers) Release(ctx context.Context, all bool) error {
 // v2:    Xenon WCOW: Returns a CombinedLayersV2 structure where ContainerRootPath is a folder
 //                    inside the utility VM which is a GUID mapping of the scratch folder. Each
 //                    of the layers are the VSMB locations where the read-only layers are mounted.
+// Job container:     Returns the mount path on the host as a volume guid, with the volume mounted on
+// 					  the host at `volumeMountPath`.
 //
 // TODO dcantah: Keep better track of the layers that are added, don't simply discard the SCSI, VSMB, etc. resource types gotten inside.
-func MountContainerLayers(ctx context.Context, layerFolders []string, guestRoot string, uvm *uvmpkg.UtilityVM) (_ string, err error) {
+
+func MountContainerLayers(ctx context.Context, containerId string, layerFolders []string, guestRoot string, volumeMountPath string, uvm *uvmpkg.UtilityVM) (_ string, err error) {
 	log.G(ctx).WithField("layerFolders", layerFolders).Debug("hcsshim::mountContainerLayers")
 
 	if uvm == nil {
@@ -78,21 +87,59 @@ func MountContainerLayers(ctx context.Context, layerFolders []string, guestRoot 
 		}
 		path := layerFolders[len(layerFolders)-1]
 		rest := layerFolders[:len(layerFolders)-1]
-		if err := wclayer.ActivateLayer(ctx, path); err != nil {
-			return "", err
-		}
-		defer func() {
-			if err != nil {
-				_ = wclayer.DeactivateLayer(ctx, path)
-			}
-		}()
+		// Simple retry loop to handle some behavior on RS5. Loopback VHDs used to be mounted in a different manor on RS5 (ws2019) which led to some
+		// very odd cases where things would succeed when they shouldn't have, or we'd simply timeout if an operation took too long. Many
+		// parallel invocations of this code path and stressing the machine seem to bring out the issues, but all of the possible failure paths
+		// that bring about the errors we have observed aren't known.
+		//
+		// On 19h1+ this *shouldn't* be needed, but the logic is to break if everything succeeded so this is harmless and shouldn't need a version check.
+		var lErr error
+		for i := 0; i < 5; i++ {
+			lErr = func() (err error) {
+				if err := wclayer.ActivateLayer(ctx, path); err != nil {
+					return err
+				}
 
-		if err := wclayer.PrepareLayer(ctx, path, rest); err != nil {
-			return "", err
+				defer func() {
+					if err != nil {
+						_ = wclayer.DeactivateLayer(ctx, path)
+					}
+				}()
+
+				return wclayer.PrepareLayer(ctx, path, rest)
+			}()
+
+			if lErr != nil {
+				// Common errors seen from the RS5 behavior mentioned above is ERROR_NOT_READY and ERROR_DEVICE_NOT_CONNECTED. The former occurs when HCS
+				// tries to grab the volume path of the disk but it doesn't succeed, usually because the disk isn't actually mounted. DEVICE_NOT_CONNECTED
+				// has been observed after launching multiple containers in parallel on a machine under high load. This has also been observed to be a trigger
+				// for ERROR_NOT_READY as well.
+				if hcserr, ok := lErr.(*hcserror.HcsError); ok {
+					if hcserr.Err == windows.ERROR_NOT_READY || hcserr.Err == windows.ERROR_DEVICE_NOT_CONNECTED {
+						// Sleep for a little before a re-attempt. A probable cause for these issues in the first place is events not getting
+						// reported in time so might be good to give some time for things to "cool down" or get back to a known state.
+						time.Sleep(time.Millisecond * 100)
+						continue
+					}
+				}
+				// This was a failure case outside of the commonly known error conditions, don't retry here.
+				return "", lErr
+			}
+
+			// No errors in layer setup, we can leave the loop
+			break
 		}
+		// If we got unlucky and ran into one of the two errors mentioned five times in a row and left the loop, we need to check
+		// the loop error here and fail also.
+		if lErr != nil {
+			return "", errors.Wrap(lErr, "layer retry loop failed")
+		}
+
+		// If any of the below fails, we want to detach the filter and unmount the disk.
 		defer func() {
 			if err != nil {
 				_ = wclayer.UnprepareLayer(ctx, path)
+				_ = wclayer.DeactivateLayer(ctx, path)
 			}
 		}()
 
@@ -100,6 +147,14 @@ func MountContainerLayers(ctx context.Context, layerFolders []string, guestRoot 
 		if err != nil {
 			return "", err
 		}
+
+		// Mount the volume to a directory on the host if requested. This is the case for job containers.
+		if volumeMountPath != "" {
+			if err := mountSandboxVolume(ctx, volumeMountPath, mountPath); err != nil {
+				return "", err
+			}
+		}
+
 		return mountPath, nil
 	}
 
@@ -198,7 +253,7 @@ func MountContainerLayers(ctx context.Context, layerFolders []string, guestRoot 
 		rootfs = containerScratchPathInUVM
 	} else {
 		rootfs = ospath.Join(uvm.OS(), guestRoot, uvmpkg.RootfsPath)
-		err = uvm.CombineLayersLCOW(ctx, lcowUvmLayerPaths, containerScratchPathInUVM, rootfs)
+		err = uvm.CombineLayersLCOW(ctx, containerId, lcowUvmLayerPaths, containerScratchPathInUVM, rootfs)
 	}
 	if err != nil {
 		return "", err
@@ -212,14 +267,14 @@ func addLCOWLayer(ctx context.Context, uvm *uvmpkg.UtilityVM, layerPath string) 
 	if !uvm.DevicesPhysicallyBacked() {
 		// We first try vPMEM and if it is full or the file is too large we
 		// fall back to SCSI.
-		uvmPath, err = uvm.AddVPMEM(ctx, layerPath)
+		uvmPath, err = uvm.AddVPMem(ctx, layerPath)
 		if err == nil {
 			log.G(ctx).WithFields(logrus.Fields{
 				"layerPath": layerPath,
 				"layerType": "vpmem",
 			}).Debug("Added LCOW layer")
 			return uvmPath, nil
-		} else if err != uvmpkg.ErrNoAvailableLocation && err != uvmpkg.ErrMaxVPMEMLayerSize {
+		} else if err != uvmpkg.ErrNoAvailableLocation && err != uvmpkg.ErrMaxVPMemLayerSize {
 			return "", fmt.Errorf("failed to add VPMEM layer: %s", err)
 		}
 	}
@@ -239,7 +294,7 @@ func addLCOWLayer(ctx context.Context, uvm *uvmpkg.UtilityVM, layerPath string) 
 
 func removeLCOWLayer(ctx context.Context, uvm *uvmpkg.UtilityVM, layerPath string) error {
 	// Assume it was added to vPMEM and fall back to SCSI
-	err := uvm.RemoveVPMEM(ctx, layerPath)
+	err := uvm.RemoveVPMem(ctx, layerPath)
 	if err == nil {
 		log.G(ctx).WithFields(logrus.Fields{
 			"layerPath": layerPath,
@@ -276,7 +331,7 @@ const (
 )
 
 // UnmountContainerLayers is a helper for clients to hide all the complexity of layer unmounting
-func UnmountContainerLayers(ctx context.Context, layerFolders []string, containerRootPath string, uvm *uvmpkg.UtilityVM, op UnmountOperation) error {
+func UnmountContainerLayers(ctx context.Context, layerFolders []string, containerRootPath, volumeMountPath string, uvm *uvmpkg.UtilityVM, op UnmountOperation) error {
 	log.G(ctx).WithField("layerFolders", layerFolders).Debug("hcsshim::unmountContainerLayers")
 	if uvm == nil {
 		// Must be an argon - folders are mounted on the host
@@ -286,6 +341,14 @@ func UnmountContainerLayers(ctx context.Context, layerFolders []string, containe
 		if len(layerFolders) < 1 {
 			return errors.New("need at least one layer for Unmount")
 		}
+
+		// Remove the mount point if there is one. This is the case for job containers.
+		if volumeMountPath != "" {
+			if err := removeSandboxMountPoint(ctx, volumeMountPath); err != nil {
+				return err
+			}
+		}
+
 		path := layerFolders[len(layerFolders)-1]
 		if err := wclayer.UnprepareLayer(ctx, path); err != nil {
 			return err
@@ -304,9 +367,16 @@ func UnmountContainerLayers(ctx context.Context, layerFolders []string, containe
 
 	// Always remove the combined layers as they are part of scsi/vsmb/vpmem
 	// removals.
-	if err := uvm.RemoveCombinedLayers(ctx, containerRootPath); err != nil {
-		log.G(ctx).WithError(err).Warn("failed guest request to remove combined layers")
-		retError = err
+	if uvm.OS() == "windows" {
+		if err := uvm.RemoveCombinedLayersWCOW(ctx, containerRootPath); err != nil {
+			log.G(ctx).WithError(err).Warn("failed guest request to remove combined layers")
+			retError = err
+		}
+	} else {
+		if err := uvm.RemoveCombinedLayersLCOW(ctx, containerRootPath); err != nil {
+			log.G(ctx).WithError(err).Warn("failed guest request to remove combined layers")
+			retError = err
+		}
 	}
 
 	// Unload the SCSI scratch path
@@ -397,4 +467,49 @@ func getScratchVHDPath(layerFolders []string) (string, error) {
 		return "", errors.Wrap(err, "failed to eval symlinks")
 	}
 	return hostPath, nil
+}
+
+// Mount the sandbox vhd to a user friendly path.
+func mountSandboxVolume(ctx context.Context, hostPath, volumeName string) (err error) {
+	log.G(ctx).WithFields(logrus.Fields{
+		"hostpath":   hostPath,
+		"volumeName": volumeName,
+	}).Debug("mounting volume for container")
+
+	if _, err := os.Stat(hostPath); os.IsNotExist(err) {
+		if err := os.MkdirAll(hostPath, 0777); err != nil {
+			return err
+		}
+	}
+
+	defer func() {
+		if err != nil {
+			os.RemoveAll(hostPath)
+		}
+	}()
+
+	// Make sure volumeName ends with a trailing slash as required.
+	if volumeName[len(volumeName)-1] != '\\' {
+		volumeName += `\` // Be nice to clients and make sure well-formed for back-compat
+	}
+
+	if err = windows.SetVolumeMountPoint(windows.StringToUTF16Ptr(hostPath), windows.StringToUTF16Ptr(volumeName)); err != nil {
+		return errors.Wrapf(err, "failed to mount sandbox volume to %s on host", hostPath)
+	}
+	return nil
+}
+
+// Remove volume mount point. And remove folder afterwards.
+func removeSandboxMountPoint(ctx context.Context, hostPath string) error {
+	log.G(ctx).WithFields(logrus.Fields{
+		"hostpath": hostPath,
+	}).Debug("removing volume mount point for container")
+
+	if err := windows.DeleteVolumeMountPoint(windows.StringToUTF16Ptr(hostPath)); err != nil {
+		return errors.Wrap(err, "failed to delete sandbox volume mount point")
+	}
+	if err := os.Remove(hostPath); err != nil {
+		return errors.Wrapf(err, "failed to remove sandbox mounted folder path %q", hostPath)
+	}
+	return nil
 }

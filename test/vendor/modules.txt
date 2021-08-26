@@ -6,12 +6,16 @@ github.com/Microsoft/go-winio/pkg/guid
 github.com/Microsoft/go-winio/pkg/process
 github.com/Microsoft/go-winio/pkg/security
 github.com/Microsoft/go-winio/vhd
-# github.com/Microsoft/hcsshim v0.8.16 => ../
+# github.com/Microsoft/hcsshim v0.8.18 => ../
 ## explicit
 github.com/Microsoft/hcsshim
 github.com/Microsoft/hcsshim/cmd/containerd-shim-runhcs-v1/options
 github.com/Microsoft/hcsshim/cmd/containerd-shim-runhcs-v1/stats
 github.com/Microsoft/hcsshim/computestorage
+github.com/Microsoft/hcsshim/ext4/dmverity
+github.com/Microsoft/hcsshim/ext4/internal/compactext4
+github.com/Microsoft/hcsshim/ext4/internal/format
+github.com/Microsoft/hcsshim/ext4/tar2ext4
 github.com/Microsoft/hcsshim/hcn
 github.com/Microsoft/hcsshim/internal/clone
 github.com/Microsoft/hcsshim/internal/cmd
@@ -37,6 +41,7 @@ github.com/Microsoft/hcsshim/internal/lcow
 github.com/Microsoft/hcsshim/internal/log
 github.com/Microsoft/hcsshim/internal/logfields
 github.com/Microsoft/hcsshim/internal/longpath
+github.com/Microsoft/hcsshim/internal/memory
 github.com/Microsoft/hcsshim/internal/mergemaps
 github.com/Microsoft/hcsshim/internal/ncproxyttrpc
 github.com/Microsoft/hcsshim/internal/oc
@@ -61,13 +66,14 @@ github.com/Microsoft/hcsshim/osversion
 github.com/Microsoft/hcsshim/pkg/go-runhcs
 github.com/Microsoft/hcsshim/pkg/ociwclayer
 github.com/Microsoft/hcsshim/pkg/octtrpc
+github.com/Microsoft/hcsshim/pkg/securitypolicy
 # github.com/blang/semver v3.5.1+incompatible
 github.com/blang/semver
 # github.com/containerd/cgroups v1.0.1
 github.com/containerd/cgroups/stats/v1
 # github.com/containerd/console v1.0.2
 github.com/containerd/console
-# github.com/containerd/containerd v1.5.1
+# github.com/containerd/containerd v1.5.4
 ## explicit
 github.com/containerd/containerd
 github.com/containerd/containerd/api/events
@@ -185,9 +191,9 @@ github.com/opencontainers/go-digest
 github.com/opencontainers/image-spec/identity
 github.com/opencontainers/image-spec/specs-go
 github.com/opencontainers/image-spec/specs-go/v1
-# github.com/opencontainers/runc v1.0.0-rc93
+# github.com/opencontainers/runc v1.0.0-rc95
 github.com/opencontainers/runc/libcontainer/user
-# github.com/opencontainers/runtime-spec v1.0.3-0.20200929063507-e6143ca7d51d
+# github.com/opencontainers/runtime-spec v1.0.3-0.20210326190908-1c3f411f0417
 ## explicit
 github.com/opencontainers/runtime-spec/specs-go
 # github.com/opencontainers/runtime-tools v0.0.0-20181011054405-1d69bd0f9c39
@@ -237,7 +243,7 @@ golang.org/x/net/trace
 ## explicit
 golang.org/x/sync/errgroup
 golang.org/x/sync/semaphore
-# golang.org/x/sys v0.0.0-20210324051608-47abb6519492
+# golang.org/x/sys v0.0.0-20210426230700-d19ff857e887
 ## explicit
 golang.org/x/sys/internal/unsafeheader
 golang.org/x/sys/unix
