@@ -3,7 +3,6 @@
 # The parent template must include ContainerPlatform/ContainerPlatform repository with "cplat" alias
 parameters:
   - name: Nightly
-    displayName: 'Pull latest upstream changes?'
     type: boolean
     default: false
 
