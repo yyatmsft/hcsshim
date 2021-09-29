@@ -80,7 +80,7 @@ func Mount(ctx context.Context, device uint32, target string, mappingInfo *prot.
 	if verityInfo != nil {
 		deviceHash = verityInfo.RootDigest
 	}
-	err = securityPolicy.EnforcePmemMountPolicy(target, deviceHash)
+	err = securityPolicy.EnforceDeviceMountPolicy(target, deviceHash)
 	if err != nil {
 		return errors.Wrapf(err, "won't mount pmem device %d onto %s", device, target)
 	}
@@ -127,6 +127,10 @@ func Unmount(ctx context.Context, devNumber uint32, target string, mappingInfo *
 	span.AddAttributes(
 		trace.Int64Attribute("device", int64(devNumber)),
 		trace.StringAttribute("target", target))
+
+	if err := securityPolicy.EnforceDeviceUnmountPolicy(target); err != nil {
+		return errors.Wrapf(err, "unmounting pmem device from %s denied by policy", target)
+	}
 
 	if err := storage.UnmountPath(ctx, target, true); err != nil {
 		return errors.Wrapf(err, "failed to unmount target: %s", target)

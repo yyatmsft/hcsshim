@@ -10,10 +10,12 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/Microsoft/hcsshim/internal/guest/prot"
 	"github.com/Microsoft/hcsshim/internal/guest/storage"
 	"github.com/Microsoft/hcsshim/internal/guest/storage/crypt"
 	"github.com/Microsoft/hcsshim/internal/log"
 	"github.com/Microsoft/hcsshim/internal/oc"
+	"github.com/Microsoft/hcsshim/pkg/securitypolicy"
 	"github.com/pkg/errors"
 	"go.opencensus.io/trace"
 	"golang.org/x/sys/unix"
@@ -29,6 +31,10 @@ var (
 	controllerLunToName = ControllerLunToName
 )
 
+const (
+	scsiDevicesPath = "/sys/bus/scsi/devices"
+)
+
 // Mount creates a mount from the SCSI device on `controller` index `lun` to
 // `target`
 //
@@ -37,14 +43,26 @@ var (
 //
 // If `encrypted` is set to true, the SCSI device will be encrypted using
 // dm-crypt.
-func Mount(ctx context.Context, controller, lun uint8, target string, readonly bool, encrypted bool, options []string) (err error) {
-	ctx, span := trace.StartSpan(ctx, "scsi::Mount")
+func Mount(ctx context.Context, controller, lun uint8, target string, readonly bool, encrypted bool, options []string, verityInfo *prot.DeviceVerityInfo, securityPolicy securitypolicy.SecurityPolicyEnforcer) (err error) {
+	spnCtx, span := trace.StartSpan(ctx, "scsi::Mount")
 	defer span.End()
 	defer func() { oc.SetSpanStatus(span, err) }()
 
 	span.AddAttributes(
 		trace.Int64Attribute("controller", int64(controller)),
 		trace.Int64Attribute("lun", int64(lun)))
+
+	if readonly {
+		// containers only have read-only layers so only enforce for them
+		var deviceHash string
+		if verityInfo != nil {
+			deviceHash = verityInfo.RootDigest
+		}
+		err = securityPolicy.EnforceDeviceMountPolicy(target, deviceHash)
+		if err != nil {
+			return errors.Wrapf(err, "won't mount scsi controller %d lun %d onto %s", controller, lun, target)
+		}
+	}
 
 	if err := osMkdirAll(target, 0700); err != nil {
 		return err
@@ -54,7 +72,7 @@ func Mount(ctx context.Context, controller, lun uint8, target string, readonly b
 			osRemoveAll(target)
 		}
 	}()
-	source, err := controllerLunToName(ctx, controller, lun)
+	source, err := controllerLunToName(spnCtx, controller, lun)
 	if err != nil {
 		return err
 	}
@@ -68,7 +86,7 @@ func Mount(ctx context.Context, controller, lun uint8, target string, readonly b
 	}
 
 	if encrypted {
-		encryptedSource, err := crypt.EncryptDevice(ctx, source)
+		encryptedSource, err := crypt.EncryptDevice(spnCtx, source)
 		if err != nil {
 			return errors.Wrapf(err, "failed to mount encrypted device: "+source)
 		}
@@ -110,7 +128,7 @@ func Mount(ctx context.Context, controller, lun uint8, target string, readonly b
 // Unmount unmounts a SCSI device mounted at `target`.
 //
 // If `encrypted` is true, it removes all its associated dm-crypto state.
-func Unmount(ctx context.Context, controller, lun uint8, target string, encrypted bool) (err error) {
+func Unmount(ctx context.Context, controller, lun uint8, target string, encrypted bool, verityInfo *prot.DeviceVerityInfo, securityPolicy securitypolicy.SecurityPolicyEnforcer) (err error) {
 	ctx, span := trace.StartSpan(ctx, "scsi::Unmount")
 	defer span.End()
 	defer func() { oc.SetSpanStatus(span, err) }()
@@ -119,6 +137,10 @@ func Unmount(ctx context.Context, controller, lun uint8, target string, encrypte
 		trace.Int64Attribute("controller", int64(controller)),
 		trace.Int64Attribute("lun", int64(lun)),
 		trace.StringAttribute("target", target))
+
+	if err = securityPolicy.EnforceDeviceUnmountPolicy(target); err != nil {
+		return errors.Wrapf(err, "unmounting scsi controller %d lun %d from  %s denied by policy", controller, lun, target)
+	}
 
 	// Unmount unencrypted device
 	if err := storage.UnmountPath(ctx, target, true); err != nil {
@@ -149,7 +171,7 @@ func ControllerLunToName(ctx context.Context, controller, lun uint8) (_ string, 
 
 	// Devices matching the given SCSI code should each have a subdirectory
 	// under /sys/bus/scsi/devices/<scsiID>/block.
-	blockPath := filepath.Join("/sys/bus/scsi/devices", scsiID, "block")
+	blockPath := filepath.Join(scsiDevicesPath, scsiID, "block")
 	var deviceNames []os.FileInfo
 	for {
 		deviceNames, err = ioutil.ReadDir(blockPath)
@@ -168,9 +190,6 @@ func ControllerLunToName(ctx context.Context, controller, lun uint8) (_ string, 
 		break
 	}
 
-	if len(deviceNames) == 0 {
-		return "", errors.Errorf("no matching device names found for SCSI ID \"%s\"", scsiID)
-	}
 	if len(deviceNames) > 1 {
 		return "", errors.Errorf("more than one block device could match SCSI ID \"%s\"", scsiID)
 	}
@@ -194,7 +213,7 @@ func UnplugDevice(ctx context.Context, controller, lun uint8) (err error) {
 		trace.Int64Attribute("lun", int64(lun)))
 
 	scsiID := fmt.Sprintf("0:0:%d:%d", controller, lun)
-	f, err := os.OpenFile(filepath.Join("/sys/bus/scsi/devices", scsiID, "delete"), os.O_WRONLY, 0644)
+	f, err := os.OpenFile(filepath.Join(scsiDevicesPath, scsiID, "delete"), os.O_WRONLY, 0644)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil

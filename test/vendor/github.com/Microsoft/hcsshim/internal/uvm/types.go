@@ -83,8 +83,9 @@ type UtilityVM struct {
 	// SCSI devices that are mapped into a Windows or Linux utility VM
 	scsiLocations       [4][64]*SCSIMount // Hyper-V supports 4 controllers, 64 slots per controller. Limited to 1 controller for now though.
 	scsiControllerCount uint32            // Number of SCSI controllers in the utility VM
+	encryptScratch      bool              // Enable scratch encryption
 
-	vpciDevices map[string]*VPCIDevice // map of device instance id to vpci device
+	vpciDevices map[VPCIDeviceKey]*VPCIDevice // map of device instance id to vpci device
 
 	// Plan9 are directories mapped into a Linux utility VM
 	plan9Counter uint64 // Each newly-added plan9 share has a counter used as its ID in the ResourceURI and for the name
@@ -121,9 +122,13 @@ type UtilityVM struct {
 	// is true
 	TemplateID string
 
+	// Location that container process dumps will get written too.
+	processDumpLocation string
+
 	// The CreateOpts used to create this uvm. These can be either of type
 	// uvm.OptionsLCOW or uvm.OptionsWCOW
 	createOpts interface{}
+
 	// Network config proxy client. If nil then this wasn't requested and the
 	// uvms network will be configured locally.
 	ncProxyClient ncproxyttrpc.NetworkConfigProxyService

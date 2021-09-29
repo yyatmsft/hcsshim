@@ -20,6 +20,10 @@ func getSandboxRootDir(id string) string {
 	return filepath.Join("/run/gcs/c", id)
 }
 
+func getSandboxHugePageMountsDir(id string) string {
+	return filepath.Join(getSandboxRootDir(id), "hugepages")
+}
+
 func getSandboxMountsDir(id string) string {
 	return filepath.Join(getSandboxRootDir(id), "sandboxMounts")
 }
@@ -47,6 +51,11 @@ func setupSandboxContainerSpec(ctx context.Context, id string, spec *oci.Spec) (
 	if err := os.MkdirAll(rootDir, 0755); err != nil {
 		return errors.Wrapf(err, "failed to create sandbox root directory %q", rootDir)
 	}
+	defer func() {
+		if err != nil {
+			_ = os.RemoveAll(rootDir)
+		}
+	}()
 
 	// Write the hostname
 	hostname := spec.Hostname
@@ -93,8 +102,18 @@ func setupSandboxContainerSpec(ctx context.Context, id string, spec *oci.Spec) (
 		return errors.Wrap(err, "failed to write sandbox resolv.conf")
 	}
 
-	if userstr, ok := spec.Annotations["io.microsoft.lcow.userstr"]; ok {
-		if err := setUserStr(spec, userstr); err != nil {
+	// User.Username is generally only used on Windows, but as there's no (easy/fast at least) way to grab
+	// a uid:gid pairing for a username string on the host, we need to defer this work until we're here in the
+	// guest. The username field is used as a temporary holding place until we can perform this work here when
+	// we actually have the rootfs to inspect.
+	if spec.Process.User.Username != "" {
+		if err := setUserStr(spec, spec.Process.User.Username); err != nil {
+			return err
+		}
+	}
+
+	if rlimCore := spec.Annotations["io.microsoft.lcow.rlimitcore"]; rlimCore != "" {
+		if err := setCoreRLimit(spec, rlimCore); err != nil {
 			return err
 		}
 	}

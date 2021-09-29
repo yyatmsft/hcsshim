@@ -11,7 +11,6 @@ import (
 
 	"github.com/Microsoft/hcsshim/internal/cmd"
 	"github.com/Microsoft/hcsshim/internal/log"
-	"github.com/Microsoft/hcsshim/internal/shimdiag"
 	"github.com/Microsoft/hcsshim/internal/uvm"
 	"github.com/pkg/errors"
 )
@@ -31,7 +30,7 @@ import (
 // this function, `vpci` is released and nil is returned for that value.
 //
 // Returns a slice of strings representing the resulting location path(s) for the specified device.
-func AddDevice(ctx context.Context, vm *uvm.UtilityVM, idType, deviceID, deviceUtilPath string) (vpci *uvm.VPCIDevice, locationPaths []string, err error) {
+func AddDevice(ctx context.Context, vm *uvm.UtilityVM, idType, deviceID string, index uint16, deviceUtilPath string) (vpci *uvm.VPCIDevice, locationPaths []string, err error) {
 	defer func() {
 		if err != nil && vpci != nil {
 			// best effort clean up allocated resource on failure
@@ -42,7 +41,7 @@ func AddDevice(ctx context.Context, vm *uvm.UtilityVM, idType, deviceID, deviceU
 		}
 	}()
 	if idType == uvm.VPCIDeviceIDType || idType == uvm.VPCIDeviceIDTypeLegacy {
-		vpci, err = vm.AssignDevice(ctx, deviceID)
+		vpci, err = vm.AssignDevice(ctx, deviceID, index)
 		if err != nil {
 			return vpci, nil, errors.Wrapf(err, "failed to assign device %s of type %s to pod %s", deviceID, idType, vm.ID())
 		}
@@ -72,11 +71,11 @@ func getChildrenDeviceLocationPaths(ctx context.Context, vm *uvm.UtilityVM, vmBu
 	go readCsPipeOutput(l, errChan, &pipeResults)
 
 	args := createDeviceUtilChildrenCommand(deviceUtilPath, vmBusInstanceID)
-	req := &shimdiag.ExecProcessRequest{
+	cmdReq := &cmd.CmdProcessRequest{
 		Args:   args,
 		Stdout: p,
 	}
-	exitCode, err := cmd.ExecInUvm(ctx, vm, req)
+	exitCode, err := cmd.ExecInUvm(ctx, vm, cmdReq)
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to find devices with exit code %d", exitCode)
 	}

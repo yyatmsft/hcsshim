@@ -5,7 +5,6 @@ package hcsv2
 import (
 	"bufio"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -80,22 +79,13 @@ func (h *Host) SetSecurityPolicy(base64Policy string) error {
 		return errors.New("security policy has already been set")
 	}
 
-	// base64 decode the incoming policy string
-	// its base64 encoded because it is coming from an annotation
-	// annotations are a map of string to string
-	// we want to store a complex json object so.... base64 it is
-	jsonPolicy, err := base64.StdEncoding.DecodeString(base64Policy)
+	// construct security policy state
+	securityPolicyState, err := securitypolicy.NewSecurityPolicyState(base64Policy)
 	if err != nil {
-		return errors.Wrap(err, "unable to decode policy from Base64 format")
+		return err
 	}
 
-	// json unmarshall the decoded to a SecurityPolicy
-	var securityPolicy securitypolicy.SecurityPolicy
-	if err := json.Unmarshal(jsonPolicy, &securityPolicy); err != nil {
-		return errors.Wrap(err, "unable to unmarshal policy")
-	}
-
-	p, err := securitypolicy.NewSecurityPolicyEnforcer(&securityPolicy)
+	p, err := securitypolicy.NewSecurityPolicyEnforcer(*securityPolicyState)
 	if err != nil {
 		return err
 	}
@@ -128,10 +118,24 @@ func (h *Host) GetContainer(id string) (*Container, error) {
 	return h.getContainerLocked(id)
 }
 
-func setupSandboxMountsPath(id string) error {
+func setupSandboxMountsPath(id string) (err error) {
 	mountPath := getSandboxMountsDir(id)
 	if err := os.MkdirAll(mountPath, 0755); err != nil {
 		return errors.Wrapf(err, "failed to create sandboxMounts dir in sandbox %v", id)
+	}
+	defer func() {
+		if err != nil {
+			_ = os.RemoveAll(mountPath)
+		}
+	}()
+
+	return storage.MountRShared(mountPath)
+}
+
+func setupSandboxHugePageMountsPath(id string) error {
+	mountPath := getSandboxHugePageMountsDir(id)
+	if err := os.MkdirAll(mountPath, 0755); err != nil {
+		return errors.Wrapf(err, "failed to create hugepage Mounts dir in sandbox %v", id)
 	}
 
 	return storage.MountRShared(mountPath)
@@ -145,7 +149,8 @@ func (h *Host) CreateContainer(ctx context.Context, id string, settings *prot.VM
 		return nil, gcserr.NewHresultError(gcserr.HrVmcomputeSystemAlreadyExists)
 	}
 
-	err = h.securityPolicyEnforcer.EnforceCommandPolicy(id, settings.OCISpecification.Process.Args)
+	err = h.securityPolicyEnforcer.EnforceCreateContainerPolicy(id, settings.OCISpecification.Process.Args, settings.OCISpecification.Process.Env)
+
 	if err != nil {
 		return nil, errors.Wrapf(err, "container creation denied due to policy")
 	}
@@ -158,38 +163,49 @@ func (h *Host) CreateContainer(ctx context.Context, id string, settings *prot.VM
 			// Capture namespaceID if any because setupSandboxContainerSpec clears the Windows section.
 			namespaceID = getNetworkNamespaceID(settings.OCISpecification)
 			err = setupSandboxContainerSpec(ctx, id, settings.OCISpecification)
+			if err != nil {
+				return nil, err
+			}
 			defer func() {
 				if err != nil {
-					defer os.RemoveAll(getSandboxRootDir(id))
+					_ = os.RemoveAll(getSandboxRootDir(id))
 				}
 			}()
-			err = setupSandboxMountsPath(id)
+
+			if err = setupSandboxMountsPath(id); err != nil {
+				return nil, err
+			}
+
+			if err = setupSandboxHugePageMountsPath(id); err != nil {
+				return nil, err
+			}
 		case "container":
 			sid, ok := settings.OCISpecification.Annotations["io.kubernetes.cri.sandbox-id"]
 			if !ok || sid == "" {
 				return nil, errors.Errorf("unsupported 'io.kubernetes.cri.sandbox-id': '%s'", sid)
 			}
-			err = setupWorkloadContainerSpec(ctx, sid, id, settings.OCISpecification)
+			if err := setupWorkloadContainerSpec(ctx, sid, id, settings.OCISpecification); err != nil {
+				return nil, err
+			}
 			defer func() {
 				if err != nil {
-					defer os.RemoveAll(getWorkloadRootDir(id))
+					_ = os.RemoveAll(getWorkloadRootDir(id))
 				}
 			}()
 		default:
-			err = errors.Errorf("unsupported 'io.kubernetes.cri.container-type': '%s'", criType)
+			return nil, errors.Errorf("unsupported 'io.kubernetes.cri.container-type': '%s'", criType)
 		}
 	} else {
 		// Capture namespaceID if any because setupStandaloneContainerSpec clears the Windows section.
 		namespaceID = getNetworkNamespaceID(settings.OCISpecification)
-		err = setupStandaloneContainerSpec(ctx, id, settings.OCISpecification)
+		if err := setupStandaloneContainerSpec(ctx, id, settings.OCISpecification); err != nil {
+			return nil, err
+		}
 		defer func() {
 			if err != nil {
-				os.RemoveAll(getStandaloneRootDir(id))
+				_ = os.RemoveAll(getStandaloneRootDir(id))
 			}
 		}()
-	}
-	if err != nil {
-		return nil, err
 	}
 
 	// Create the BundlePath
@@ -250,7 +266,7 @@ func (h *Host) CreateContainer(ctx context.Context, id string, settings *prot.VM
 func (h *Host) modifyHostSettings(ctx context.Context, containerID string, settings *prot.ModifySettingRequest) error {
 	switch settings.ResourceType {
 	case prot.MrtMappedVirtualDisk:
-		return modifyMappedVirtualDisk(ctx, settings.RequestType, settings.Settings.(*prot.MappedVirtualDiskV2))
+		return modifyMappedVirtualDisk(ctx, settings.RequestType, settings.Settings.(*prot.MappedVirtualDiskV2), h.securityPolicyEnforcer)
 	case prot.MrtMappedDirectory:
 		return modifyMappedDirectory(ctx, h.vsock, settings.RequestType, settings.Settings.(*prot.MappedDirectoryV2))
 	case prot.MrtVPMemDevice:
@@ -410,18 +426,18 @@ func newInvalidRequestTypeError(rt prot.ModifyRequestType) error {
 	return errors.Errorf("the RequestType \"%s\" is not supported", rt)
 }
 
-func modifyMappedVirtualDisk(ctx context.Context, rt prot.ModifyRequestType, mvd *prot.MappedVirtualDiskV2) (err error) {
+func modifyMappedVirtualDisk(ctx context.Context, rt prot.ModifyRequestType, mvd *prot.MappedVirtualDiskV2, securityPolicy securitypolicy.SecurityPolicyEnforcer) (err error) {
 	switch rt {
 	case prot.MreqtAdd:
-		mountCtx, cancel := context.WithTimeout(ctx, time.Second*4)
+		mountCtx, cancel := context.WithTimeout(ctx, time.Second*5)
 		defer cancel()
 		if mvd.MountPath != "" {
-			return scsi.Mount(mountCtx, mvd.Controller, mvd.Lun, mvd.MountPath, mvd.ReadOnly, false, mvd.Options)
+			return scsi.Mount(mountCtx, mvd.Controller, mvd.Lun, mvd.MountPath, mvd.ReadOnly, mvd.Encrypted, mvd.Options, mvd.VerityInfo, securityPolicy)
 		}
 		return nil
 	case prot.MreqtRemove:
 		if mvd.MountPath != "" {
-			if err := scsi.Unmount(ctx, mvd.Controller, mvd.Lun, mvd.MountPath, false); err != nil {
+			if err := scsi.Unmount(ctx, mvd.Controller, mvd.Lun, mvd.MountPath, mvd.Encrypted, mvd.VerityInfo, securityPolicy); err != nil {
 				return err
 			}
 		}

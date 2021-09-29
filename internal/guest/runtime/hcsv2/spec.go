@@ -5,12 +5,12 @@ package hcsv2
 import (
 	"context"
 	"fmt"
-	"github.com/Microsoft/hcsshim/internal/log"
-	"github.com/opencontainers/runc/libcontainer/devices"
 	"path/filepath"
 	"strconv"
 	"strings"
 
+	"github.com/Microsoft/hcsshim/internal/log"
+	"github.com/opencontainers/runc/libcontainer/devices"
 	"github.com/opencontainers/runc/libcontainer/user"
 	oci "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/pkg/errors"
@@ -61,6 +61,32 @@ func setProcess(spec *oci.Spec) {
 	if spec.Process == nil {
 		spec.Process = &oci.Process{}
 	}
+}
+
+func setCoreRLimit(spec *oci.Spec, value string) error {
+	setProcess(spec)
+
+	vals := strings.Split(value, ";")
+	if len(vals) != 2 {
+		return errors.New("wrong number of values supplied for rlimit core")
+	}
+
+	soft, err := strconv.ParseUint(vals[0], 10, 64)
+	if err != nil {
+		return errors.Wrap(err, "failed to parse soft core rlimit")
+	}
+	hard, err := strconv.ParseUint(vals[1], 10, 64)
+	if err != nil {
+		return errors.Wrap(err, "failed to parse hard core rlimit")
+	}
+
+	spec.Process.Rlimits = append(spec.Process.Rlimits, oci.POSIXRlimit{
+		Type: "RLIMIT_CORE",
+		Soft: soft,
+		Hard: hard,
+	})
+
+	return nil
 }
 
 // setUserStr sets `spec.Process` to the valid `userstr` based on the OCI Image Spec
@@ -225,11 +251,5 @@ func applyAnnotationsToSpec(ctx context.Context, spec *oci.Spec) error {
 		}
 	}
 
-	// Check if we need to set non-default user
-	if userstr, ok := spec.Annotations["io.microsoft.lcow.userstr"]; ok {
-		if err := setUserStr(spec, userstr); err != nil {
-			return err
-		}
-	}
 	return nil
 }

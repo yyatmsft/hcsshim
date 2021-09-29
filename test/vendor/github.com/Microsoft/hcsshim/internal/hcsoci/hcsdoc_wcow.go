@@ -4,6 +4,7 @@ package hcsoci
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"regexp"
@@ -75,6 +76,9 @@ func createMountsConfig(ctx context.Context, coi *createOptionsInternal) (*mount
 					return nil, err
 				}
 				mdv2.HostPath = uvmPath
+			} else if strings.HasPrefix(mount.Source, "sandbox://") {
+				// Convert to the path in the guest that was asked for.
+				mdv2.HostPath = convertToWCOWSandboxMountPath(mount.Source)
 			} else {
 				// vsmb mount
 				uvmPath, err := coi.HostingSystem.GetVSMBUvmPath(ctx, mount.Source, readOnly)
@@ -269,7 +273,7 @@ func createWindowsContainerDocument(ctx context.Context, coi *createOptionsInter
 		// Use the reserved network namespace for containers created inside
 		// cloned or template UVMs.
 		if coi.HostingSystem != nil && (coi.HostingSystem.IsTemplate || coi.HostingSystem.IsClone) {
-			v2Container.Networking.Namespace = uvm.DEFAULT_CLONE_NETWORK_NAMESPACE_ID
+			v2Container.Networking.Namespace = uvm.DefaultCloneNetworkNamespaceID
 		} else {
 			v2Container.Networking.Namespace = coi.actualNetworkNamespace
 		}
@@ -382,6 +386,51 @@ func createWindowsContainerDocument(ctx context.Context, coi *createOptionsInter
 	}
 	v2Container.AdditionalDeviceNamespace = extensions
 
+	// Process dump setup (if requested)
+	dumpPath := ""
+	if coi.HostingSystem != nil {
+		dumpPath = coi.HostingSystem.ProcessDumpLocation()
+	}
+
+	if specDumpPath, ok := coi.Spec.Annotations[oci.AnnotationContainerProcessDumpLocation]; ok {
+		// If a process dump path was specified at pod creation time for a hypervisor isolated pod, then
+		// use this value. If one was specified on the container creation document then override with this
+		// instead. Unlike Linux, Windows containers can set the dump path on a per container basis.
+		dumpPath = specDumpPath
+	}
+
+	if dumpPath != "" {
+		dumpType, err := parseDumpType(coi.Spec.Annotations)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		// Setup WER registry keys for local process dump creation if specified.
+		// https://docs.microsoft.com/en-us/windows/win32/wer/collecting-user-mode-dumps
+		v2Container.RegistryChanges = &hcsschema.RegistryChanges{
+			AddValues: []hcsschema.RegistryValue{
+				{
+					Key: &hcsschema.RegistryKey{
+						Hive: "Software",
+						Name: "Microsoft\\Windows\\Windows Error Reporting\\LocalDumps",
+					},
+					Name:        "DumpFolder",
+					StringValue: dumpPath,
+					Type_:       "String",
+				},
+				{
+					Key: &hcsschema.RegistryKey{
+						Hive: "Software",
+						Name: "Microsoft\\Windows\\Windows Error Reporting\\LocalDumps",
+					},
+					Name:       "DumpType",
+					DWordValue: dumpType,
+					Type_:      "DWord",
+				},
+			},
+		}
+	}
+
 	return v1, v2Container, nil
 }
 
@@ -411,4 +460,23 @@ func parseAssignedDevices(ctx context.Context, coi *createOptionsInternal, v2 *h
 	}
 	v2.AssignedDevices = v2AssignedDevices
 	return nil
+}
+
+// parseDumpType parses the passed in string representation of the local user mode process dump type to the
+// corresponding value the registry expects to be set.
+//
+// See DumpType at https://docs.microsoft.com/en-us/windows/win32/wer/collecting-user-mode-dumps for the mappings
+func parseDumpType(annotations map[string]string) (int32, error) {
+	dmpTypeStr := annotations[oci.AnnotationWCOWProcessDumpType]
+	switch dmpTypeStr {
+	case "":
+		// If no type specified, default to full dumps.
+		return 2, nil
+	case "mini":
+		return 1, nil
+	case "full":
+		return 2, nil
+	default:
+		return -1, errors.New(`unknown dump type specified, valid values are "mini" or "full"`)
+	}
 }

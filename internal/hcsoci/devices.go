@@ -7,6 +7,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"strconv"
 
 	"github.com/Microsoft/hcsshim/internal/devices"
 	hcsschema "github.com/Microsoft/hcsshim/internal/hcs/schema2"
@@ -21,10 +22,10 @@ import (
 
 const deviceUtilExeName = "device-util.exe"
 
-// getAssignedDeviceKernelDrivers gets any device drivers specified on the spec.
+// getSpecKernelDrivers gets any device drivers specified on the spec.
 // Drivers are optional, therefore do not return an error if none are on the spec.
-func getAssignedDeviceKernelDrivers(annotations map[string]string) ([]string, error) {
-	drivers := oci.ParseAnnotationCommaSeparated(oci.AnnotationAssignedDeviceKernelDrivers, annotations)
+func getSpecKernelDrivers(annotations map[string]string) ([]string, error) {
+	drivers := oci.ParseAnnotationCommaSeparated(oci.AnnotationVirtualMachineKernelDrivers, annotations)
 	for _, driver := range drivers {
 		if _, err := os.Stat(driver); err != nil {
 			return nil, errors.Wrapf(err, "failed to find path to drivers at %s", driver)
@@ -123,7 +124,8 @@ func handleAssignedDevicesWindows(ctx context.Context, vm *uvm.UtilityVM, annota
 
 	// assign device into UVM and create corresponding spec windows devices
 	for _, d := range specDevs {
-		vpciCloser, locationPaths, err := devices.AddDevice(ctx, vm, d.IDType, d.ID, deviceUtilPath)
+		pciID, index := getDeviceInfoFromPath(d.ID)
+		vpciCloser, locationPaths, err := devices.AddDevice(ctx, vm, d.IDType, pciID, index, deviceUtilPath)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -139,4 +141,15 @@ func handleAssignedDevicesWindows(ctx context.Context, vm *uvm.UtilityVM, annota
 	}
 
 	return resultDevs, closers, nil
+}
+
+func getDeviceInfoFromPath(rawDevicePath string) (string, uint16) {
+	indexString := filepath.Base(rawDevicePath)
+	index, err := strconv.ParseUint(indexString, 10, 16)
+	if err == nil {
+		// we have a vf index
+		return filepath.Dir(rawDevicePath), uint16(index)
+	}
+	// otherwise, just use default index and full device ID given
+	return rawDevicePath, 0
 }

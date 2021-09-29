@@ -13,33 +13,102 @@ import (
 )
 
 const (
-	maxContainersInGeneratedPolicy = 32
-	maxLayersInGeneratedContainer  = 32
-	maxGeneratedContainerID        = 1000000
-	maxGeneratedCommandLength      = 128
-	maxGeneratedCommandArgs        = 12
-	maxGeneratedMountTargetLength  = 256
-	rootHashLength                 = 64
+	// variables that influence generated test fixtures
+	maxContainersInGeneratedPolicy            = 32
+	maxLayersInGeneratedContainer             = 32
+	maxGeneratedContainerID                   = 1000000
+	maxGeneratedCommandLength                 = 128
+	maxGeneratedCommandArgs                   = 12
+	maxGeneratedEnvironmentVariables          = 24
+	maxGeneratedEnvironmentVariableRuleLength = 64
+	maxGeneratedEnvironmentVariableRules      = 12
+	maxGeneratedMountTargetLength             = 256
+	rootHashLength                            = 64
+	// additional consts
+	// the standard enforcer tests don't do anything with the encoded policy
+	// string. this const exists to make that explicit
+	ignoredEncodedPolicyString = ""
 )
+
+// Validate that our conversion from the external SecurityPolicy representation
+// to our internal format is done correctly.
+func Test_StandardSecurityPolicyEnforcer_From_Security_Policy_Conversion(t *testing.T) {
+	f := func(p *SecurityPolicy) bool {
+		containers, err := p.Containers.toInternal()
+		if err != nil {
+			t.Logf("unexpected setup error. this might mean test fixture setup has a bug: %v", err)
+			return false
+		}
+
+		if len(containers) != p.Containers.Length {
+			t.Errorf("number of containers doesn't match. internal: %d, external: %d", len(containers), p.Containers.Length)
+			return false
+		}
+
+		// do by index comparison of containers
+		for i := 0; i < len(containers); i++ {
+			internal := containers[i]
+			external := p.Containers.Elements[strconv.Itoa(i)]
+
+			// verify sanity with size
+			if len(internal.Command) != external.Command.Length {
+				t.Errorf("number of command args doesn't match for container %d. internal: %d, external: %d", i, len(internal.Command), external.Command.Length)
+			}
+
+			if len(internal.EnvRules) != external.EnvRules.Length {
+				t.Errorf("number of env rules doesn't match for container %d. internal: %d, external: %d", i, len(internal.EnvRules), external.EnvRules.Length)
+			}
+
+			if len(internal.Layers) != external.Layers.Length {
+				t.Errorf("number of layers doesn't match for container %d. internal: %d, external: %d", i, len(internal.Layers), external.Layers.Length)
+			}
+
+			// do by index comparison of sub-items
+			for j := 0; j < len(internal.Command); j++ {
+				if internal.Command[j] != external.Command.Elements[strconv.Itoa(j)] {
+					t.Errorf("command entries at index %d for for container %d don't match. internal: %s, external: %s", j, i, internal.Command[j], external.Command.Elements[strconv.Itoa(j)])
+				}
+			}
+
+			for j := 0; j < len(internal.EnvRules); j++ {
+				irule := internal.EnvRules[j]
+				erule := external.EnvRules.Elements[strconv.Itoa(j)]
+				if (irule.Strategy != erule.Strategy) ||
+					(irule.Rule != erule.Rule) {
+					t.Errorf("env rule entries at index %d for for container %d don't match. internal: %v, external: %v", j, i, irule, erule)
+				}
+			}
+
+			for j := 0; j < len(internal.Layers); j++ {
+				if internal.Layers[j] != external.Layers.Elements[strconv.Itoa(j)] {
+					t.Errorf("layer entries at index %d for for container %d don't match. internal: %s, external: %s", j, i, internal.Layers[j], external.Layers.Elements[strconv.Itoa(j)])
+				}
+			}
+		}
+
+		return !t.Failed()
+	}
+
+	if err := quick.Check(f, &quick.Config{MaxCount: 1000}); err != nil {
+		t.Errorf("Test_StandardSecurityPolicyEnforcer_From_Security_Policy_Conversion failed: %v", err)
+	}
+}
 
 // Do we correctly set up the data structures that are part of creating a new
 // StandardSecurityPolicyEnforcer
 func Test_StandardSecurityPolicyEnforcer_Devices_Initialization(t *testing.T) {
-	f := func(p *SecurityPolicy) bool {
-		policy, err := NewStandardSecurityPolicyEnforcer(p)
-		if err != nil {
-			return false
-		}
+	f := func(p *generatedContainers) bool {
+		policy := NewStandardSecurityPolicyEnforcer(p.containers, ignoredEncodedPolicyString)
 
 		// there should be a device entry for each container
-		if len(p.Containers) != len(policy.Devices) {
+		if len(p.containers) != len(policy.Devices) {
 			return false
 		}
 
 		// in each device entry that corresponds to a container,
 		// the array should have space for all the root hashes
-		for i := 0; i < len(p.Containers); i++ {
-			if len(p.Containers[i].Layers) != len(policy.Devices[i]) {
+		for i := 0; i < len(p.containers); i++ {
+			if len(p.containers[i].Layers) != len(policy.Devices[i]) {
 				return false
 			}
 		}
@@ -52,69 +121,106 @@ func Test_StandardSecurityPolicyEnforcer_Devices_Initialization(t *testing.T) {
 	}
 }
 
-// Verify that StandardSecurityPolicyEnforcer.EnforcePmemMountPolicy will return
-// an error when there's no matching root hash in the policy
-func Test_EnforcePmemMountPolicy_No_Matches(t *testing.T) {
-	f := func(p *SecurityPolicy) bool {
-
-		policy, err := NewStandardSecurityPolicyEnforcer(p)
-		if err != nil {
-			return false
-		}
+// Verify that StandardSecurityPolicyEnforcer.EnforceDeviceMountPolicy will
+// return an error when there's no matching root hash in the policy
+func Test_EnforceDeviceMountPolicy_No_Matches(t *testing.T) {
+	f := func(p *generatedContainers) bool {
+		policy := NewStandardSecurityPolicyEnforcer(p.containers, ignoredEncodedPolicyString)
 
 		r := rand.New(rand.NewSource(time.Now().UnixNano()))
 		target := generateMountTarget(r)
 		rootHash := generateInvalidRootHash(r)
 
-		err = policy.EnforcePmemMountPolicy(target, rootHash)
+		err := policy.EnforceDeviceMountPolicy(target, rootHash)
 
 		// we expect an error, not getting one means something is broken
 		return err != nil
 	}
 
 	if err := quick.Check(f, &quick.Config{MaxCount: 1000}); err != nil {
-		t.Errorf("Test_EnforcePmemMountPolicy_No_Matches failed: %v", err)
+		t.Errorf("Test_EnforceDeviceMountPolicy_No_Matches failed: %v", err)
 	}
 }
 
-// Verify that StandardSecurityPolicyEnforcer.EnforcePmemMountPolicy doesn't return
-// an error when there's a matching root hash in the policy
-func Test_EnforcePmemMountPolicy_Matches(t *testing.T) {
-	f := func(p *SecurityPolicy) bool {
+// Verify that StandardSecurityPolicyEnforcer.EnforceDeviceMountPolicy doesn't
+// return an error when there's a matching root hash in the policy
+func Test_EnforceDeviceMountPolicy_Matches(t *testing.T) {
+	f := func(p *generatedContainers) bool {
 
-		policy, err := NewStandardSecurityPolicyEnforcer(p)
-		if err != nil {
-			return false
-		}
+		policy := NewStandardSecurityPolicyEnforcer(p.containers, ignoredEncodedPolicyString)
 
 		r := rand.New(rand.NewSource(time.Now().UnixNano()))
 		target := generateMountTarget(r)
-		rootHash := selectRootHashFromPolicy(p, r)
+		rootHash := selectRootHashFromContainers(p, r)
 
-		err = policy.EnforcePmemMountPolicy(target, rootHash)
+		err := policy.EnforceDeviceMountPolicy(target, rootHash)
 
 		// getting an error means something is broken
 		return err == nil
 	}
 
 	if err := quick.Check(f, &quick.Config{MaxCount: 1000}); err != nil {
-		t.Errorf("Test_EnforcePmemMountPolicy_No_Matches failed: %v", err)
+		t.Errorf("Test_EnforceDeviceMountPolicy_No_Matches failed: %v", err)
 	}
 }
 
-// Verify that StandardSecurityPolicyEnforcer.EnforceOverlayMountPolicy will return
-// an error when there's no matching overlay targets.
-func Test_EnforceOverlayMountPolicy_No_Matches(t *testing.T) {
-	f := func(p *SecurityPolicy) bool {
+func Test_EnforceDeviceUmountPolicy_Removes_Device_Entries(t *testing.T) {
+	f := func(p *generatedContainers) bool {
+		policy := NewStandardSecurityPolicyEnforcer(p.containers, ignoredEncodedPolicyString)
 
-		policy, err := NewStandardSecurityPolicyEnforcer(p)
+		r := rand.New(rand.NewSource(time.Now().UnixNano()))
+		target := generateMountTarget(r)
+		rootHash := selectRootHashFromContainers(p, r)
+
+		err := policy.EnforceDeviceMountPolicy(target, rootHash)
 		if err != nil {
 			return false
 		}
 
+		// we set up an expected new data structure shape were
+		// the target has been removed, but everything else is
+		// the same
+		setupCorrectlyDone := false
+		expectedDevices := make([][]string, len(policy.Devices))
+		for i, container := range policy.Devices {
+			expectedDevices[i] = make([]string, len(container))
+			for j, storedTarget := range container {
+				if target == storedTarget {
+					setupCorrectlyDone = true
+				} else {
+					expectedDevices[i][j] = storedTarget
+				}
+			}
+		}
+		if !setupCorrectlyDone {
+			// somehow, setup failed. this should never happen without another test
+			// also failing
+			return false
+		}
+
+		err = policy.EnforceDeviceUnmountPolicy(target)
+		if err != nil {
+			return false
+		}
+
+		return cmp.Equal(policy.Devices, expectedDevices)
+	}
+
+	if err := quick.Check(f, &quick.Config{MaxCount: 1000}); err != nil {
+		t.Errorf("Test_EnforceDeviceUmountPolicy_Removes_Device_Entries failed: %v", err)
+	}
+}
+
+// Verify that StandardSecurityPolicyEnforcer.EnforceOverlayMountPolicy will
+// return an error when there's no matching overlay targets.
+func Test_EnforceOverlayMountPolicy_No_Matches(t *testing.T) {
+	f := func(p *generatedContainers) bool {
+
+		policy := NewStandardSecurityPolicyEnforcer(p.containers, ignoredEncodedPolicyString)
+
 		r := rand.New(rand.NewSource(time.Now().UnixNano()))
-		containerID := generateContainerId(r)
-		container := selectContainerFromPolicy(p, r)
+		containerID := generateContainerID(r)
+		container := selectContainerFromContainers(p, r)
 
 		layerPaths, err := createInvalidOverlayForContainer(policy, container, r)
 		if err != nil {
@@ -135,16 +241,13 @@ func Test_EnforceOverlayMountPolicy_No_Matches(t *testing.T) {
 // Verify that StandardSecurityPolicyEnforcer.EnforceOverlayMountPolicy doesn't
 // return an error when there's a valid overlay target.
 func Test_EnforceOverlayMountPolicy_Matches(t *testing.T) {
-	f := func(p *SecurityPolicy) bool {
+	f := func(p *generatedContainers) bool {
 
-		policy, err := NewStandardSecurityPolicyEnforcer(p)
-		if err != nil {
-			return false
-		}
+		policy := NewStandardSecurityPolicyEnforcer(p.containers, ignoredEncodedPolicyString)
 
 		r := rand.New(rand.NewSource(time.Now().UnixNano()))
-		containerID := generateContainerId(r)
-		container := selectContainerFromPolicy(p, r)
+		containerID := generateContainerID(r)
+		container := selectContainerFromContainers(p, r)
 
 		layerPaths, err := createValidOverlayForContainer(policy, container, r)
 		if err != nil {
@@ -165,15 +268,12 @@ func Test_EnforceOverlayMountPolicy_Matches(t *testing.T) {
 // Tests the specific case of trying to mount the same overlay twice using the /// same container id. This should be disallowed.
 func Test_EnforceOverlayMountPolicy_Overlay_Single_Container_Twice(t *testing.T) {
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
-	p := generateSecurityPolicy(r, 1)
+	p := generateContainers(r, 1)
 
-	policy, err := NewStandardSecurityPolicyEnforcer(p)
-	if err != nil {
-		t.Fatalf("expected nil error got: %v", err)
-	}
+	policy := NewStandardSecurityPolicyEnforcer(p.containers, ignoredEncodedPolicyString)
 
-	containerID := generateContainerId(r)
-	container := selectContainerFromPolicy(p, r)
+	containerID := generateContainerID(r)
+	container := selectContainerFromContainers(p, r)
 
 	layerPaths, err := createValidOverlayForContainer(policy, container, r)
 	if err != nil {
@@ -198,11 +298,11 @@ func Test_EnforceOverlayMountPolicy_Overlay_Single_Container_Twice(t *testing.T)
 func Test_EnforceOverlayMountPolicy_Multiple_Instances_Same_Container(t *testing.T) {
 	for containersToCreate := 2; containersToCreate <= maxContainersInGeneratedPolicy; containersToCreate++ {
 		r := rand.New(rand.NewSource(time.Now().UnixNano()))
-		var containers []SecurityPolicyContainer
+		var containers []securityPolicyContainer
 
 		for i := 1; i <= int(containersToCreate); i++ {
 			arg := "command " + strconv.Itoa(i)
-			c := SecurityPolicyContainer{
+			c := securityPolicyContainer{
 				Command: []string{arg},
 				Layers:  []string{"1", "2"},
 			}
@@ -210,19 +310,11 @@ func Test_EnforceOverlayMountPolicy_Multiple_Instances_Same_Container(t *testing
 			containers = append(containers, c)
 		}
 
-		p := &SecurityPolicy{
-			AllowAll:   false,
-			Containers: containers,
-		}
-
-		policy, err := NewStandardSecurityPolicyEnforcer(p)
-		if err != nil {
-			t.Fatal("unexpected error on test setup")
-		}
+		policy := NewStandardSecurityPolicyEnforcer(containers, "")
 
 		idsUsed := map[string]bool{}
-		for i := 0; i < len(p.Containers); i++ {
-			layerPaths, err := createValidOverlayForContainer(policy, p.Containers[i], r)
+		for i := 0; i < len(containers); i++ {
+			layerPaths, err := createValidOverlayForContainer(policy, containers[i], r)
 			if err != nil {
 				t.Fatal("unexpected error on test setup")
 			}
@@ -230,7 +322,7 @@ func Test_EnforceOverlayMountPolicy_Multiple_Instances_Same_Container(t *testing
 			idUnique := false
 			var id string
 			for idUnique == false {
-				id = generateContainerId(r)
+				id = generateContainerID(r)
 				_, found := idsUsed[id]
 				idUnique = !found
 				idsUsed[id] = true
@@ -251,20 +343,17 @@ func Test_EnforceOverlayMountPolicy_Multiple_Instances_Same_Container(t *testing
 // but no more than that one.
 func Test_EnforceOverlayMountPolicy_Overlay_Single_Container_Twice_With_Different_IDs(t *testing.T) {
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
-	p := generateSecurityPolicy(r, 1)
+	p := generateContainers(r, 1)
 
-	policy, err := NewStandardSecurityPolicyEnforcer(p)
-	if err != nil {
-		t.Fatalf("expected nil error got: %v", err)
-	}
+	policy := NewStandardSecurityPolicyEnforcer(p.containers, ignoredEncodedPolicyString)
 
 	var containerIDOne, containerIDTwo string
 
 	for containerIDOne == containerIDTwo {
-		containerIDOne = generateContainerId(r)
-		containerIDTwo = generateContainerId(r)
+		containerIDOne = generateContainerID(r)
+		containerIDTwo = generateContainerID(r)
 	}
-	container := selectContainerFromPolicy(p, r)
+	container := selectContainerFromContainers(p, r)
 
 	layerPaths, err := createValidOverlayForContainer(policy, container, r)
 	if err != nil {
@@ -283,15 +372,12 @@ func Test_EnforceOverlayMountPolicy_Overlay_Single_Container_Twice_With_Differen
 }
 
 func Test_EnforceCommandPolicy_Matches(t *testing.T) {
-	f := func(p *SecurityPolicy) bool {
-		policy, err := NewStandardSecurityPolicyEnforcer(p)
-		if err != nil {
-			return false
-		}
+	f := func(p *generatedContainers) bool {
+		policy := NewStandardSecurityPolicyEnforcer(p.containers, ignoredEncodedPolicyString)
 
 		r := rand.New(rand.NewSource(time.Now().UnixNano()))
-		containerID := generateContainerId(r)
-		container := selectContainerFromPolicy(p, r)
+		containerID := generateContainerID(r)
+		container := selectContainerFromContainers(p, r)
 
 		layerPaths, err := createValidOverlayForContainer(policy, container, r)
 		if err != nil {
@@ -303,7 +389,7 @@ func Test_EnforceCommandPolicy_Matches(t *testing.T) {
 			return false
 		}
 
-		err = policy.EnforceCommandPolicy(containerID, container.Command)
+		err = policy.enforceCommandPolicy(containerID, container.Command)
 
 		// getting an error means something is broken
 		return err == nil
@@ -315,15 +401,12 @@ func Test_EnforceCommandPolicy_Matches(t *testing.T) {
 }
 
 func Test_EnforceCommandPolicy_NoMatches(t *testing.T) {
-	f := func(p *SecurityPolicy) bool {
-		policy, err := NewStandardSecurityPolicyEnforcer(p)
-		if err != nil {
-			return false
-		}
+	f := func(p *generatedContainers) bool {
+		policy := NewStandardSecurityPolicyEnforcer(p.containers, ignoredEncodedPolicyString)
 
 		r := rand.New(rand.NewSource(time.Now().UnixNano()))
-		containerID := generateContainerId(r)
-		container := selectContainerFromPolicy(p, r)
+		containerID := generateContainerID(r)
+		container := selectContainerFromContainers(p, r)
 
 		layerPaths, err := createValidOverlayForContainer(policy, container, r)
 		if err != nil {
@@ -335,7 +418,7 @@ func Test_EnforceCommandPolicy_NoMatches(t *testing.T) {
 			return false
 		}
 
-		err = policy.EnforceCommandPolicy(containerID, generateCommand(r))
+		err = policy.enforceCommandPolicy(containerID, generateCommand(r))
 
 		// not getting an error means something is broken
 		return err != nil
@@ -357,29 +440,26 @@ func Test_EnforceCommandPolicy_NoMatches(t *testing.T) {
 // This test verifies the "narrowing possible container ids that could be
 // the container in our policy" functionality works correctly.
 func Test_EnforceCommandPolicy_NarrowingMatches(t *testing.T) {
-	f := func(p *SecurityPolicy) bool {
+	f := func(p *generatedContainers) bool {
 		r := rand.New(rand.NewSource(time.Now().UnixNano()))
 		// create two additional containers that "share everything"
 		// except that they have different commands
-		testContainerOne := generateSecurityPolicyContainer(r, 5)
+		testContainerOne := generateContainersContainer(r, 5)
 		testContainerTwo := testContainerOne
 		testContainerTwo.Command = generateCommand(r)
 		// add new containers to policy before creating enforcer
-		p.Containers = append(p.Containers, testContainerOne, testContainerTwo)
+		p.containers = append(p.containers, testContainerOne, testContainerTwo)
 
-		policy, err := NewStandardSecurityPolicyEnforcer(p)
-		if err != nil {
-			return false
-		}
+		policy := NewStandardSecurityPolicyEnforcer(p.containers, ignoredEncodedPolicyString)
 
-		testContainerOneId := ""
-		testContainerTwoId := ""
+		testContainerOneID := ""
+		testContainerTwoID := ""
 		indexForContainerOne := -1
 		indexForContainerTwo := -1
 
 		// mount and overlay all our containers
-		for index, container := range p.Containers {
-			containerID := generateContainerId(r)
+		for index, container := range p.containers {
+			containerID := generateContainerID(r)
 
 			layerPaths, err := createValidOverlayForContainer(policy, container, r)
 			if err != nil {
@@ -392,11 +472,11 @@ func Test_EnforceCommandPolicy_NarrowingMatches(t *testing.T) {
 			}
 
 			if cmp.Equal(container, testContainerOne) {
-				testContainerOneId = containerID
+				testContainerOneID = containerID
 				indexForContainerOne = index
 			}
 			if cmp.Equal(container, testContainerTwo) {
-				testContainerTwoId = containerID
+				testContainerTwoID = containerID
 				indexForContainerTwo = index
 			}
 		}
@@ -406,8 +486,8 @@ func Test_EnforceCommandPolicy_NarrowingMatches(t *testing.T) {
 		if len(containerOneMapping) != 2 {
 			return false
 		}
-		for _, id := range containerOneMapping {
-			if (id != testContainerOneId) && (id != testContainerTwoId) {
+		for id := range containerOneMapping {
+			if (id != testContainerOneID) && (id != testContainerTwoID) {
 				return false
 			}
 		}
@@ -416,15 +496,15 @@ func Test_EnforceCommandPolicy_NarrowingMatches(t *testing.T) {
 		if len(containerTwoMapping) != 2 {
 			return false
 		}
-		for _, id := range containerTwoMapping {
-			if (id != testContainerOneId) && (id != testContainerTwoId) {
+		for id := range containerTwoMapping {
+			if (id != testContainerOneID) && (id != testContainerTwoID) {
 				return false
 			}
 		}
 
 		// enforce command policy for containerOne
 		// this will narrow our list of possible ids down
-		err = policy.EnforceCommandPolicy(testContainerOneId, testContainerOne.Command)
+		err := policy.enforceCommandPolicy(testContainerOneID, testContainerOne.Command)
 		if err != nil {
 			return false
 		}
@@ -435,8 +515,8 @@ func Test_EnforceCommandPolicy_NarrowingMatches(t *testing.T) {
 		if len(updatedMapping) != 1 {
 			return false
 		}
-		for _, id := range updatedMapping {
-			if id != testContainerTwoId {
+		for id := range updatedMapping {
+			if id != testContainerTwoID {
 				return false
 			}
 		}
@@ -451,29 +531,290 @@ func Test_EnforceCommandPolicy_NarrowingMatches(t *testing.T) {
 	}
 }
 
+func Test_EnforceEnvironmentVariablePolicy_Matches(t *testing.T) {
+	f := func(p *generatedContainers) bool {
+		policy := NewStandardSecurityPolicyEnforcer(p.containers, ignoredEncodedPolicyString)
+
+		r := rand.New(rand.NewSource(time.Now().UnixNano()))
+		containerID := generateContainerID(r)
+		container := selectContainerFromContainers(p, r)
+
+		layerPaths, err := createValidOverlayForContainer(policy, container, r)
+		if err != nil {
+			return false
+		}
+
+		err = policy.EnforceOverlayMountPolicy(containerID, layerPaths)
+		if err != nil {
+			return false
+		}
+
+		envVars := buildEnvironmentVariablesFromContainerRules(container, r)
+		err = policy.enforceEnvironmentVariablePolicy(containerID, envVars)
+
+		// getting an error means something is broken
+		return err == nil
+	}
+
+	if err := quick.Check(f, &quick.Config{MaxCount: 1000}); err != nil {
+		t.Errorf("Test_EnforceEnvironmentVariablePolicy_Matches: %v", err)
+	}
+}
+
+func Test_EnforceEnvironmentVariablePolicy_Re2Match(t *testing.T) {
+	r := rand.New(rand.NewSource(time.Now().UnixNano()))
+	p := generateContainers(r, 1)
+
+	container := generateContainersContainer(r, 1)
+	// add a rule to re2 match
+	re2MatchRule := securityPolicyEnvironmentVariableRule{
+		Strategy: EnvVarRuleRegex,
+		Rule:     "PREFIX_.+=.+"}
+	container.EnvRules = append(container.EnvRules, re2MatchRule)
+	p.containers = append(p.containers, container)
+
+	policy := NewStandardSecurityPolicyEnforcer(p.containers, ignoredEncodedPolicyString)
+
+	containerID := generateContainerID(r)
+
+	layerPaths, err := createValidOverlayForContainer(policy, container, r)
+	if err != nil {
+		t.Fatalf("expected nil error got: %v", err)
+	}
+
+	err = policy.EnforceOverlayMountPolicy(containerID, layerPaths)
+	if err != nil {
+		t.Fatalf("expected nil error got: %v", err)
+	}
+
+	envVars := []string{"PREFIX_FOO=BAR"}
+	err = policy.enforceEnvironmentVariablePolicy(containerID, envVars)
+
+	// getting an error means something is broken
+	if err != nil {
+		t.Fatalf("expected nil error got: %v", err)
+	}
+}
+
+func Test_EnforceEnvironmentVariablePolicy_NotAllMatches(t *testing.T) {
+	f := func(p *generatedContainers) bool {
+		policy := NewStandardSecurityPolicyEnforcer(p.containers, ignoredEncodedPolicyString)
+
+		r := rand.New(rand.NewSource(time.Now().UnixNano()))
+		containerID := generateContainerID(r)
+		container := selectContainerFromContainers(p, r)
+
+		layerPaths, err := createValidOverlayForContainer(policy, container, r)
+		if err != nil {
+			return false
+		}
+
+		err = policy.EnforceOverlayMountPolicy(containerID, layerPaths)
+		if err != nil {
+			return false
+		}
+
+		envVars := generateEnvironmentVariables(r)
+		envVars = append(envVars, generateNeverMatchingEnvironmentVariable(r))
+		err = policy.enforceEnvironmentVariablePolicy(containerID, envVars)
+
+		// not getting an error means something is broken
+		return err != nil
+	}
+
+	if err := quick.Check(f, &quick.Config{MaxCount: 1000}); err != nil {
+		t.Errorf("Test_EnforceEnvironmentVariablePolicy_NotAllMatches: %v", err)
+	}
+}
+
+// This is a tricky test.
+// The key to understanding it is, that when we have multiple containers
+// with the same base aka same mounts and overlay, then we don't know at the
+// time of overlay which container from policy is a given container id refers
+// to. Instead we have a list of possible container ids for the so far matching
+// containers in policy. We can narrow down the list of possible containers
+// at the time that we enforce environment variables, the same as we do with
+// commands.
+//
+// This test verifies the "narrowing possible container ids that could be
+// the container in our policy" functionality works correctly.
+func Test_EnforceEnvironmentVariablePolicy_NarrowingMatches(t *testing.T) {
+	f := func(p *generatedContainers) bool {
+		r := rand.New(rand.NewSource(time.Now().UnixNano()))
+		// create two additional containers that "share everything"
+		// except that they have different environment variables
+		testContainerOne := generateContainersContainer(r, 5)
+		testContainerTwo := testContainerOne
+		testContainerTwo.EnvRules = generateEnvironmentVariableRules(r)
+		// add new containers to policy before creating enforcer
+		p.containers = append(p.containers, testContainerOne, testContainerTwo)
+
+		policy := NewStandardSecurityPolicyEnforcer(p.containers, ignoredEncodedPolicyString)
+
+		testContainerOneID := ""
+		testContainerTwoID := ""
+		indexForContainerOne := -1
+		indexForContainerTwo := -1
+
+		// mount and overlay all our containers
+		for index, container := range p.containers {
+			containerID := generateContainerID(r)
+
+			layerPaths, err := createValidOverlayForContainer(policy, container, r)
+			if err != nil {
+				return false
+			}
+
+			err = policy.EnforceOverlayMountPolicy(containerID, layerPaths)
+			if err != nil {
+				return false
+			}
+
+			if cmp.Equal(container, testContainerOne) {
+				testContainerOneID = containerID
+				indexForContainerOne = index
+			}
+			if cmp.Equal(container, testContainerTwo) {
+				testContainerTwoID = containerID
+				indexForContainerTwo = index
+			}
+		}
+
+		// validate our expectations prior to enforcing command policy
+		containerOneMapping := policy.ContainerIndexToContainerIds[indexForContainerOne]
+		if len(containerOneMapping) != 2 {
+			return false
+		}
+		for id := range containerOneMapping {
+			if (id != testContainerOneID) && (id != testContainerTwoID) {
+				return false
+			}
+		}
+
+		containerTwoMapping := policy.ContainerIndexToContainerIds[indexForContainerTwo]
+		if len(containerTwoMapping) != 2 {
+			return false
+		}
+		for id := range containerTwoMapping {
+			if (id != testContainerOneID) && (id != testContainerTwoID) {
+				return false
+			}
+		}
+
+		// enforce command policy for containerOne
+		// this will narrow our list of possible ids down
+		envVars := buildEnvironmentVariablesFromContainerRules(testContainerOne, r)
+		err := policy.enforceEnvironmentVariablePolicy(testContainerOneID, envVars)
+		if err != nil {
+			return false
+		}
+
+		// Ok, we have full setup and we can now verify that when we enforced
+		// command policy above that it correctly narrowed down containerTwo
+		updatedMapping := policy.ContainerIndexToContainerIds[indexForContainerTwo]
+		if len(updatedMapping) != 1 {
+			return false
+		}
+		for id := range updatedMapping {
+			if id != testContainerTwoID {
+				return false
+			}
+		}
+
+		return true
+	}
+
+	// This is a more expensive test to run than others, so we run fewer times
+	// for each run,
+	if err := quick.Check(f, &quick.Config{MaxCount: 100}); err != nil {
+		t.Errorf("Test_EnforceEnvironmentVariablePolicy_NarrowingMatches: %v", err)
+	}
+}
+
 //
 // Setup and "fixtures" follow...
 //
 
 func (*SecurityPolicy) Generate(r *rand.Rand, size int) reflect.Value {
-	p := generateSecurityPolicy(r, maxContainersInGeneratedPolicy)
+	// This fixture setup is used from 1 test. Given the limited scope it is
+	// used from, all functionality is in this single function. That saves having
+	// confusing fixture name functions where we have generate* for both internal
+	// and external versions
+	p := &SecurityPolicy{
+		Containers: Containers{
+			Elements: map[string]Container{},
+		},
+	}
+	p.AllowAll = false
+	numContainers := int(atLeastOneAtMost(r, maxContainersInGeneratedPolicy))
+	for i := 0; i < numContainers; i++ {
+		c := Container{
+			Command: CommandArgs{
+				Elements: map[string]string{},
+			},
+			EnvRules: EnvRules{
+				Elements: map[string]EnvRule{},
+			},
+			Layers: Layers{
+				Elements: map[string]string{},
+			},
+		}
+
+		// command
+		numArgs := int(atLeastOneAtMost(r, maxGeneratedCommandArgs))
+		for i := 0; i < numArgs; i++ {
+			c.Command.Elements[strconv.Itoa(i)] = randVariableString(r, maxGeneratedCommandLength)
+		}
+		c.Command.Length = numArgs
+
+		// layers
+		numLayers := int(atLeastOneAtMost(r, maxLayersInGeneratedContainer))
+		for i := 0; i < numLayers; i++ {
+			c.Layers.Elements[strconv.Itoa(i)] = generateRootHash(r)
+		}
+		c.Layers.Length = numLayers
+
+		// env variable rules
+		numEnvRules := int(atMost(r, maxGeneratedEnvironmentVariableRules))
+		for i := 0; i < numEnvRules; i++ {
+			rule := EnvRule{
+				Strategy: "string",
+				Rule:     randVariableString(r, maxGeneratedEnvironmentVariableRuleLength),
+			}
+			c.EnvRules.Elements[strconv.Itoa(i)] = rule
+		}
+		c.EnvRules.Length = numEnvRules
+
+		p.Containers.Elements[strconv.Itoa(i)] = c
+	}
+
+	p.Containers.Length = numContainers
+
 	return reflect.ValueOf(p)
 }
 
-func generateSecurityPolicy(r *rand.Rand, numContainers int32) *SecurityPolicy {
-	p := &SecurityPolicy{}
-	p.AllowAll = false
-	containers := atLeastOneAtMost(r, numContainers)
-	for i := 0; i < (int)(containers); i++ {
-		p.Containers = append(p.Containers, generateSecurityPolicyContainer(r, maxLayersInGeneratedContainer))
-	}
-
-	return p
+func (*generatedContainers) Generate(r *rand.Rand, size int) reflect.Value {
+	c := generateContainers(r, maxContainersInGeneratedPolicy)
+	return reflect.ValueOf(c)
 }
 
-func generateSecurityPolicyContainer(r *rand.Rand, size int32) SecurityPolicyContainer {
-	c := SecurityPolicyContainer{}
+func generateContainers(r *rand.Rand, upTo int32) *generatedContainers {
+	containers := []securityPolicyContainer{}
+
+	numContainers := (int)(atLeastOneAtMost(r, upTo))
+	for i := 0; i < numContainers; i++ {
+		containers = append(containers, generateContainersContainer(r, maxLayersInGeneratedContainer))
+	}
+
+	return &generatedContainers{
+		containers: containers,
+	}
+}
+
+func generateContainersContainer(r *rand.Rand, size int32) securityPolicyContainer {
+	c := securityPolicyContainer{}
 	c.Command = generateCommand(r)
+	c.EnvRules = generateEnvironmentVariableRules(r)
 	layers := int(atLeastOneAtMost(r, size))
 	for i := 0; i < layers; i++ {
 		c.Layers = append(c.Layers, generateRootHash(r))
@@ -497,6 +838,75 @@ func generateCommand(r *rand.Rand) []string {
 	return args
 }
 
+func generateEnvironmentVariableRules(r *rand.Rand) []securityPolicyEnvironmentVariableRule {
+	rules := []securityPolicyEnvironmentVariableRule{}
+
+	numArgs := atLeastOneAtMost(r, maxGeneratedEnvironmentVariableRules)
+	for i := 0; i < int(numArgs); i++ {
+		rule := securityPolicyEnvironmentVariableRule{
+			Strategy: "string",
+			Rule:     randVariableString(r, maxGeneratedEnvironmentVariableRuleLength),
+		}
+		rules = append(rules, rule)
+	}
+
+	return rules
+}
+
+func generateEnvironmentVariables(r *rand.Rand) []string {
+	envVars := []string{}
+
+	numVars := atLeastOneAtMost(r, maxGeneratedEnvironmentVariables)
+	for i := 0; i < int(numVars); i++ {
+		variable := randVariableString(r, maxGeneratedEnvironmentVariableRuleLength)
+		envVars = append(envVars, variable)
+	}
+
+	return envVars
+}
+
+func generateNeverMatchingEnvironmentVariable(r *rand.Rand) string {
+	return randString(r, maxGeneratedEnvironmentVariableRuleLength+1)
+}
+
+func buildEnvironmentVariablesFromContainerRules(c securityPolicyContainer, r *rand.Rand) []string {
+	vars := make([]string, 0)
+
+	// Select some number of the valid, matching rules to be environment
+	// variable
+	numberOfRules := int32(len(c.EnvRules))
+	numberOfMatches := randMinMax(r, 1, numberOfRules)
+	usedIndexes := map[int]struct{}{}
+	for numberOfMatches > 0 {
+		anIndex := -1
+		if (numberOfMatches * 2) > numberOfRules {
+			// if we have a lot of matches, randomly select
+			exists := true
+
+			for exists {
+				anIndex = int(randMinMax(r, 0, numberOfRules-1))
+				_, exists = usedIndexes[anIndex]
+			}
+		} else {
+			// we have a "smaller set of rules. we'll just iterate and select from
+			// available
+			exists := true
+
+			for exists {
+				anIndex++
+				_, exists = usedIndexes[anIndex]
+			}
+		}
+
+		vars = append(vars, c.EnvRules[anIndex].Rule)
+		usedIndexes[anIndex] = struct{}{}
+
+		numberOfMatches--
+	}
+
+	return vars
+}
+
 func generateMountTarget(r *rand.Rand) string {
 	return randVariableString(r, maxGeneratedMountTargetLength)
 }
@@ -508,32 +918,32 @@ func generateInvalidRootHash(r *rand.Rand) string {
 	return randVariableString(r, rootHashLength-1)
 }
 
-func selectRootHashFromPolicy(policy *SecurityPolicy, r *rand.Rand) string {
+func selectRootHashFromContainers(containers *generatedContainers, r *rand.Rand) string {
 
-	numberOfContainersInPolicy := len(policy.Containers)
-	container := policy.Containers[r.Intn(numberOfContainersInPolicy)]
+	numberOfContainersInPolicy := len(containers.containers)
+	container := containers.containers[r.Intn(numberOfContainersInPolicy)]
 	numberOfLayersInContainer := len(container.Layers)
 
 	return container.Layers[r.Intn(numberOfLayersInContainer)]
 }
 
-func generateContainerId(r *rand.Rand) string {
+func generateContainerID(r *rand.Rand) string {
 	id := atLeastOneAtMost(r, maxGeneratedContainerID)
 	return strconv.FormatInt(int64(id), 10)
 }
 
-func selectContainerFromPolicy(policy *SecurityPolicy, r *rand.Rand) SecurityPolicyContainer {
-	numberOfContainersInPolicy := len(policy.Containers)
-	return policy.Containers[r.Intn(numberOfContainersInPolicy)]
+func selectContainerFromContainers(containers *generatedContainers, r *rand.Rand) securityPolicyContainer {
+	numberOfContainersInPolicy := len(containers.containers)
+	return containers.containers[r.Intn(numberOfContainersInPolicy)]
 }
 
-func createValidOverlayForContainer(enforcer SecurityPolicyEnforcer, container SecurityPolicyContainer, r *rand.Rand) ([]string, error) {
+func createValidOverlayForContainer(enforcer SecurityPolicyEnforcer, container securityPolicyContainer, r *rand.Rand) ([]string, error) {
 	// storage for our mount paths
 	overlay := make([]string, len(container.Layers))
 
 	for i := 0; i < len(container.Layers); i++ {
 		mount := generateMountTarget(r)
-		err := enforcer.EnforcePmemMountPolicy(mount, container.Layers[i])
+		err := enforcer.EnforceDeviceMountPolicy(mount, container.Layers[i])
 		if err != nil {
 			return overlay, err
 		}
@@ -544,7 +954,7 @@ func createValidOverlayForContainer(enforcer SecurityPolicyEnforcer, container S
 	return overlay, nil
 }
 
-func createInvalidOverlayForContainer(enforcer SecurityPolicyEnforcer, container SecurityPolicyContainer, r *rand.Rand) ([]string, error) {
+func createInvalidOverlayForContainer(enforcer SecurityPolicyEnforcer, container securityPolicyContainer, r *rand.Rand) ([]string, error) {
 	method := r.Intn(3)
 	if method == 0 {
 		return invalidOverlaySameSizeWrongMounts(enforcer, container, r)
@@ -555,13 +965,13 @@ func createInvalidOverlayForContainer(enforcer SecurityPolicyEnforcer, container
 	}
 }
 
-func invalidOverlaySameSizeWrongMounts(enforcer SecurityPolicyEnforcer, container SecurityPolicyContainer, r *rand.Rand) ([]string, error) {
+func invalidOverlaySameSizeWrongMounts(enforcer SecurityPolicyEnforcer, container securityPolicyContainer, r *rand.Rand) ([]string, error) {
 	// storage for our mount paths
 	overlay := make([]string, len(container.Layers))
 
 	for i := 0; i < len(container.Layers); i++ {
 		mount := generateMountTarget(r)
-		err := enforcer.EnforcePmemMountPolicy(mount, container.Layers[i])
+		err := enforcer.EnforceDeviceMountPolicy(mount, container.Layers[i])
 		if err != nil {
 			return overlay, err
 		}
@@ -573,7 +983,7 @@ func invalidOverlaySameSizeWrongMounts(enforcer SecurityPolicyEnforcer, containe
 	return overlay, nil
 }
 
-func invalidOverlayCorrectDevicesWrongOrderSomeMissing(enforcer SecurityPolicyEnforcer, container SecurityPolicyContainer, r *rand.Rand) ([]string, error) {
+func invalidOverlayCorrectDevicesWrongOrderSomeMissing(enforcer SecurityPolicyEnforcer, container securityPolicyContainer, r *rand.Rand) ([]string, error) {
 	if len(container.Layers) == 1 {
 		// won't work with only 1, we need to bail out to another method
 		return invalidOverlayRandomJunk(enforcer, container, r)
@@ -583,7 +993,7 @@ func invalidOverlayCorrectDevicesWrongOrderSomeMissing(enforcer SecurityPolicyEn
 
 	for i := 0; i < len(container.Layers); i++ {
 		mount := generateMountTarget(r)
-		err := enforcer.EnforcePmemMountPolicy(mount, container.Layers[i])
+		err := enforcer.EnforceDeviceMountPolicy(mount, container.Layers[i])
 		if err != nil {
 			return overlay, err
 		}
@@ -596,7 +1006,7 @@ func invalidOverlayCorrectDevicesWrongOrderSomeMissing(enforcer SecurityPolicyEn
 	return overlay, nil
 }
 
-func invalidOverlayRandomJunk(enforcer SecurityPolicyEnforcer, container SecurityPolicyContainer, r *rand.Rand) ([]string, error) {
+func invalidOverlayRandomJunk(enforcer SecurityPolicyEnforcer, container securityPolicyContainer, r *rand.Rand) ([]string, error) {
 	// create "junk" for entry
 	layersToCreate := r.Int31n(maxLayersInGeneratedContainer)
 	overlay := make([]string, layersToCreate)
@@ -608,7 +1018,7 @@ func invalidOverlayRandomJunk(enforcer SecurityPolicyEnforcer, container Securit
 	// setup entirely different and "correct" expected mounting
 	for i := 0; i < len(container.Layers); i++ {
 		mount := generateMountTarget(r)
-		err := enforcer.EnforcePmemMountPolicy(mount, container.Layers[i])
+		err := enforcer.EnforceDeviceMountPolicy(mount, container.Layers[i])
 		if err != nil {
 			return overlay, err
 		}
@@ -636,4 +1046,13 @@ func randMinMax(r *rand.Rand, min int32, max int32) int32 {
 
 func atLeastOneAtMost(r *rand.Rand, most int32) int32 {
 	return randMinMax(r, 1, most)
+}
+
+func atMost(r *rand.Rand, most int32) int32 {
+	return randMinMax(r, 0, most)
+}
+
+// a type to hold a list of generated containers
+type generatedContainers struct {
+	containers []securityPolicyContainer
 }

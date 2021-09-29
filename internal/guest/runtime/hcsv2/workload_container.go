@@ -14,6 +14,7 @@ import (
 	oci "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/pkg/errors"
 	"go.opencensus.io/trace"
+	"golang.org/x/sys/unix"
 )
 
 func getWorkloadRootDir(id string) string {
@@ -28,6 +29,8 @@ func updateSandboxMounts(sbid string, spec *oci.Spec) error {
 			subPath := strings.TrimPrefix(m.Source, sandboxMountPrefix)
 			sandboxSource := filepath.Join(mountsDir, subPath)
 
+			// filepath.Join cleans the resulting path before returning so it would resolve the relative path if one was given.
+			// Hence, we need to ensure that the resolved path is still under the correct directory
 			if !strings.HasPrefix(sandboxSource, mountsDir) {
 				return errors.Errorf("mount path %v for mount %v is not within sandbox's mounts dir", sandboxSource, m.Source)
 			}
@@ -38,6 +41,38 @@ func updateSandboxMounts(sbid string, spec *oci.Spec) error {
 			if os.IsNotExist(err) {
 				if err := os.MkdirAll(sandboxSource, 0755); err != nil {
 					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func updateHugePageMounts(sbid string, spec *oci.Spec) error {
+	mountPrefix := "hugepages://"
+	for i, m := range spec.Mounts {
+		if strings.HasPrefix(m.Source, mountPrefix) {
+			mountsDir := getSandboxHugePageMountsDir(sbid)
+			subPath := strings.TrimPrefix(m.Source, mountPrefix)
+			pageSize := strings.Split(subPath, string(os.PathSeparator))[0]
+			hugePageMountSource := filepath.Join(mountsDir, subPath)
+
+			// filepath.Join cleans the resulting path before returning so it would resolve the relative path if one was given.
+			// Hence, we need to ensure that the resolved path is still under the correct directory
+			if !strings.HasPrefix(hugePageMountSource, mountsDir) {
+				return errors.Errorf("mount path %v for mount %v is not within hugepages's mounts dir", hugePageMountSource, m.Source)
+			}
+
+			spec.Mounts[i].Source = hugePageMountSource
+
+			_, err := os.Stat(hugePageMountSource)
+			if os.IsNotExist(err) {
+				if err := os.MkdirAll(hugePageMountSource, 0755); err != nil {
+					return err
+				}
+
+				if err := unix.Mount("none", hugePageMountSource, "hugetlbfs", 0, "pagesize="+pageSize); err != nil {
+					return errors.Errorf("mount operation failed for %v failed with error %v", hugePageMountSource, err)
 				}
 			}
 		}
@@ -70,6 +105,10 @@ func setupWorkloadContainerSpec(ctx context.Context, sbid, id string, spec *oci.
 	// update any sandbox mounts with the sandboxMounts directory path and create files
 	if err = updateSandboxMounts(sbid, spec); err != nil {
 		return errors.Wrapf(err, "failed to update sandbox mounts for container %v in sandbox %v", id, sbid)
+	}
+
+	if err = updateHugePageMounts(sbid, spec); err != nil {
+		return errors.Wrapf(err, "failed to update hugepages mounts for container %v in sandbox %v", id, sbid)
 	}
 
 	// Add /etc/hostname if the spec did not override it.
@@ -120,6 +159,22 @@ func setupWorkloadContainerSpec(ctx context.Context, sbid, id string, spec *oci.
 
 	if err := applyAnnotationsToSpec(ctx, spec); err != nil {
 		return err
+	}
+
+	if rlimCore := spec.Annotations["io.microsoft.lcow.rlimitcore"]; rlimCore != "" {
+		if err := setCoreRLimit(spec, rlimCore); err != nil {
+			return err
+		}
+	}
+
+	// User.Username is generally only used on Windows, but as there's no (easy/fast at least) way to grab
+	// a uid:gid pairing for a username string on the host, we need to defer this work until we're here in the
+	// guest. The username field is used as a temporary holding place until we can perform this work here when
+	// we actually have the rootfs to inspect.
+	if spec.Process.User.Username != "" {
+		if err := setUserStr(spec, spec.Process.User.Username); err != nil {
+			return err
+		}
 	}
 
 	// Force the parent cgroup into our /containers root

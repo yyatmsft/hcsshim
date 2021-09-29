@@ -7,14 +7,20 @@ import (
 // For testing. Records the number of calls to each method so we can verify
 // the expected interactions took place.
 type MountMonitoringSecurityPolicyEnforcer struct {
-	PmemMountCalls    int
-	OverlayMountCalls int
+	DeviceMountCalls   int
+	DeviceUnmountCalls int
+	OverlayMountCalls  int
 }
 
 var _ securitypolicy.SecurityPolicyEnforcer = (*MountMonitoringSecurityPolicyEnforcer)(nil)
 
-func (p *MountMonitoringSecurityPolicyEnforcer) EnforcePmemMountPolicy(target string, deviceHash string) (err error) {
-	p.PmemMountCalls++
+func (p *MountMonitoringSecurityPolicyEnforcer) EnforceDeviceMountPolicy(target string, deviceHash string) (err error) {
+	p.DeviceMountCalls++
+	return nil
+}
+
+func (p *MountMonitoringSecurityPolicyEnforcer) EnforceDeviceUnmountPolicy(target string) (err error) {
+	p.DeviceUnmountCalls++
 	return nil
 }
 
@@ -23,6 +29,6 @@ func (p *MountMonitoringSecurityPolicyEnforcer) EnforceOverlayMountPolicy(contai
 	return nil
 }
 
-func (p *MountMonitoringSecurityPolicyEnforcer) EnforceCommandPolicy(containerID string, argList []string) (err error) {
+func (p *MountMonitoringSecurityPolicyEnforcer) EnforceCreateContainerPolicy(containerID string, argList []string, envList []string) (err error) {
 	return nil
 }

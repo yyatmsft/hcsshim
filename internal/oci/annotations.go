@@ -73,11 +73,12 @@ const (
 	// AnnotationGPUVHDPath overrides the default path to search for the gpu vhd
 	AnnotationGPUVHDPath = "io.microsoft.lcow.gpuvhdpath"
 
-	// AnnotationAssignedDeviceKernelDrivers indicates what drivers to install in the pod during device
-	// assignment. This value should contain a list of comma separated directories containing all
-	// files and information needed to install given driver(s). This may include .sys,
-	// .inf, .cer, and/or other files used during standard installation with pnputil.
-	AnnotationAssignedDeviceKernelDrivers = "io.microsoft.assigneddevice.kerneldrivers"
+	// AnnotationVirtualMachineKernelDrivers indicates what drivers to install in the pod.
+	// This value should contain a list of comma separated directories containing all
+	// files and information needed to install given driver(s). For windows, this may
+	// include .sys, .inf, .cer, and/or other files used during standard installation with pnputil.
+	// For LCOW, this may include a vhd file that contains kernel modules as *.ko files.
+	AnnotationVirtualMachineKernelDrivers = "io.microsoft.virtualmachine.kerneldrivers"
 
 	// AnnotationDeviceExtensions contains a comma separated list of full paths to device extension files.
 	// The content of these are added to a container's hcs create document.
@@ -214,6 +215,23 @@ const (
 	// when setting up ncproxy and computeagent
 	AnnotationNcproxyContainerID = "io.microsoft.network.ncproxy.containerid"
 
+	// AnnotationEncryptedScratchDisk indicates whether or not the container scratch disks
+	// should be encrypted or not
+	AnnotationEncryptedScratchDisk = "io.microsoft.virtualmachine.storage.scratch.encrypted"
+
 	// AnnotationSecurityPolicy is used to specify a security policy for opengcs to enforce
 	AnnotationSecurityPolicy = "io.microsoft.virtualmachine.lcow.securitypolicy"
+	// AnnotationContainerProcessDumpLocation specifies a path inside of containers to save process dumps to. As
+	// the scratch space for a container is generally cleaned up after exit, this is best set to a volume mount of
+	// some kind (vhd, bind mount, fileshare mount etc.)
+	AnnotationContainerProcessDumpLocation = "io.microsoft.container.processdumplocation"
+
+	// AnnotationWCOWProcessDumpType specifies the type of dump to create when generating a local user mode
+	// process dump for Windows containers. The supported options are "mini", and "full".
+	// See DumpType: https://docs.microsoft.com/en-us/windows/win32/wer/collecting-user-mode-dumps
+	AnnotationWCOWProcessDumpType = "io.microsoft.wcow.processdumptype"
+
+	// AnnotationRLimitCore specifies the core rlimit value for a container. This will need to be set
+	// in order to have core dumps generated for a given container.
+	AnnotationRLimitCore = "io.microsoft.lcow.rlimitcore"
 )

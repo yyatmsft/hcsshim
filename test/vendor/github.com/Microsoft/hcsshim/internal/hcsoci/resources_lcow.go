@@ -108,7 +108,15 @@ func allocateLinuxResources(ctx context.Context, coi *createOptionsInternal, r *
 
 				// if the scsi device is already attached then we take the uvm path that the function below returns
 				// that is where it was previously mounted in UVM
-				scsiMount, err := coi.HostingSystem.AddSCSI(ctx, hostPath, uvmPathForShare, readOnly, mount.Options, uvm.VMAccessTypeIndividual)
+				scsiMount, err := coi.HostingSystem.AddSCSI(
+					ctx,
+					hostPath,
+					uvmPathForShare,
+					readOnly,
+					false,
+					mount.Options,
+					uvm.VMAccessTypeIndividual,
+				)
 				if err != nil {
 					return errors.Wrapf(err, "adding SCSI virtual disk mount %+v", mount)
 				}
@@ -119,6 +127,19 @@ func allocateLinuxResources(ctx context.Context, coi *createOptionsInternal, r *
 			} else if strings.HasPrefix(mount.Source, "sandbox://") {
 				// Mounts that map to a path in UVM are specified with 'sandbox://' prefix.
 				// example: sandbox:///a/dirInUvm destination:/b/dirInContainer
+				uvmPathForFile = mount.Source
+			} else if strings.HasPrefix(mount.Source, "hugepages://") {
+				// currently we only support 2M hugepage size
+				hugePageSubDirs := strings.Split(strings.TrimPrefix(mount.Source, "hugepages://"), "/")
+				if len(hugePageSubDirs) < 2 {
+					return errors.Errorf(`%s mount path is invalid, expected format: hugepages://<hugepage-size>/<hugepage-src-location>`, mount.Source)
+				}
+
+				// hugepages:// should be followed by pagesize
+				if hugePageSubDirs[0] != "2M" {
+					return errors.Errorf(`only 2M (megabytes) pagesize is supported, got %s`, hugePageSubDirs[0])
+				}
+				// Hugepages inside a container are backed by a mount created inside a UVM.
 				uvmPathForFile = mount.Source
 			} else {
 				st, err := os.Stat(hostPath)
@@ -153,7 +174,8 @@ func allocateLinuxResources(ctx context.Context, coi *createOptionsInternal, r *
 		switch d.IDType {
 		case uvm.GPUDeviceIDType:
 			addGPUVHD = true
-			vpci, err := coi.HostingSystem.AssignDevice(ctx, d.ID)
+			pciID, index := getDeviceInfoFromPath(d.ID)
+			vpci, err := coi.HostingSystem.AssignDevice(ctx, pciID, index)
 			if err != nil {
 				return errors.Wrapf(err, "failed to assign gpu device %s to pod %s", d.ID, coi.HostingSystem.ID())
 			}
@@ -175,7 +197,15 @@ func allocateLinuxResources(ctx context.Context, coi *createOptionsInternal, r *
 		// must use scsi here since DDA'ing a hyper-v pci device is not supported on VMs that have ANY virtual memory
 		// gpuvhd must be granted VM Group access.
 		options := []string{"ro"}
-		scsiMount, err := coi.HostingSystem.AddSCSI(ctx, gpuSupportVhdPath, uvm.LCOWNvidiaMountPath, true, options, uvm.VMAccessTypeNoop)
+		scsiMount, err := coi.HostingSystem.AddSCSI(
+			ctx,
+			gpuSupportVhdPath,
+			uvm.LCOWNvidiaMountPath,
+			true,
+			false,
+			options,
+			uvm.VMAccessTypeNoop,
+		)
 		if err != nil {
 			return errors.Wrapf(err, "failed to add scsi device %s in the UVM %s at %s", gpuSupportVhdPath, coi.HostingSystem.ID(), uvm.LCOWNvidiaMountPath)
 		}

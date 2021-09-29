@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"regexp"
+	"strconv"
 
 	"github.com/BurntSushi/toml"
 	"github.com/Microsoft/hcsshim/ext4/dmverity"
 	"github.com/Microsoft/hcsshim/ext4/tar2ext4"
-	sp "github.com/Microsoft/hcsshim/pkg/securitypolicy"
+	"github.com/Microsoft/hcsshim/pkg/securitypolicy"
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
@@ -19,9 +21,7 @@ import (
 
 var (
 	configFile = flag.String("c", "", "config")
-	outputJson = flag.Bool("j", false, "json")
-	username    = flag.String("u", "", "username")
-	password    = flag.String("p", "", "password")
+	outputJSON = flag.Bool("j", false, "json")
 )
 
 func main() {
@@ -38,8 +38,8 @@ func main() {
 		}
 
 		config := &Config{
-			AllowAll: false,
-			Images:   []Image{},
+			AllowAll:   false,
+			Containers: []Container{},
 		}
 
 		err = toml.Unmarshal(configData, config)
@@ -47,7 +47,7 @@ func main() {
 			return err
 		}
 
-		policy, err := func() (sp.SecurityPolicy, error) {
+		policy, err := func() (securitypolicy.SecurityPolicy, error) {
 			if config.AllowAll {
 				return createOpenDoorPolicy(), nil
 			} else {
@@ -63,7 +63,7 @@ func main() {
 		if err != nil {
 			return err
 		}
-		if *outputJson {
+		if *outputJSON {
 			fmt.Printf("%s\n", j)
 		}
 		b := base64.StdEncoding.EncodeToString(j)
@@ -78,57 +78,83 @@ func main() {
 	}
 }
 
-type Image struct {
-	Name    string   `toml:"name"`
-	Command []string `toml:"command"`
+type EnvironmentVariableRule struct {
+	Strategy securitypolicy.EnvVarRule `toml:"strategy"`
+	Rule     string                    `toml:"rule"`
+}
+
+type Container struct {
+	Name     string                    `toml:"name"`
+	Auth     ImageAuth                 `toml:"auth"`
+	Command  []string                  `toml:"command"`
+	EnvRules []EnvironmentVariableRule `toml:"env_rule"`
+}
+
+type ImageAuth struct {
+	Username string `toml:"username"`
+	Password string `toml:"password"`
 }
 
 type Config struct {
-	AllowAll bool    `toml:"allow_all"`
-	Images   []Image `toml:"image"`
+	AllowAll   bool        `toml:"allow_all"`
+	Containers []Container `toml:"container"`
 }
 
-func createOpenDoorPolicy() sp.SecurityPolicy {
-	return sp.SecurityPolicy{
+func createOpenDoorPolicy() securitypolicy.SecurityPolicy {
+	return securitypolicy.SecurityPolicy{
 		AllowAll: true,
 	}
 }
 
-func createPolicyFromConfig(config Config) (sp.SecurityPolicy, error) {
-	p := sp.SecurityPolicy{}
-
-	// for now, we hardcode the pause container version 3.1 here
-	// in a final end user tool, we would not do it this way.
-	// as this is a tool for use by developers currently working
-	// on security policy implementation code
-	pausec := sp.SecurityPolicyContainer{
-		Command: []string{"/pause"},
-		Layers:  []string{"16b514057a06ad665f92c02863aca074fd5976c755d26bff16365299169e8415"},
-	}
-	p.Containers = append(p.Containers, pausec)
-
-	var imageOptions []remote.Option
-	if len(*username) != 0 && len(*password) != 0 {
-		auth := authn.Basic{
-			Username: *username,
-			Password: *password}
-		c, _ := auth.Authorization()
-		authOption := remote.WithAuth(authn.FromConfig(*c))
-		imageOptions = append(imageOptions, authOption)
+func createPolicyFromConfig(config Config) (securitypolicy.SecurityPolicy, error) {
+	p := securitypolicy.SecurityPolicy{
+		Containers: securitypolicy.Containers{
+			Elements: map[string]securitypolicy.Container{},
+		},
 	}
 
-	for _, image := range config.Images {
-		container := sp.SecurityPolicyContainer{
-			Command: image.Command,
-			Layers:  []string{},
+	// Hardcode the pause container version and command. We still pull it
+	// to get the root hash and any environment variable rules we might need.
+	pause := Container{
+		Name:     "k8s.gcr.io/pause:3.1",
+		Command:  []string{"/pause"},
+		EnvRules: []EnvironmentVariableRule{}}
+	config.Containers = append(config.Containers, pause)
+
+	for _, configContainer := range config.Containers {
+		var imageOptions []remote.Option
+
+		if configContainer.Auth.Username != "" && configContainer.Auth.Password != "" {
+			auth := authn.Basic{
+				Username: configContainer.Auth.Username,
+				Password: configContainer.Auth.Password}
+			c, _ := auth.Authorization()
+			authOption := remote.WithAuth(authn.FromConfig(*c))
+			imageOptions = append(imageOptions, authOption)
 		}
-		ref, err := name.ParseReference(image.Name)
+
+		// validate EnvRules
+		err := validateEnvRules(configContainer.EnvRules)
 		if err != nil {
-			return p, fmt.Errorf("'%s' isn't a valid image name\n", image.Name)
+			return p, err
+		}
+
+		command := convertCommand(configContainer.Command)
+		envRules := convertEnvironmentVariableRules(configContainer.EnvRules)
+		container := securitypolicy.Container{
+			Command:  command,
+			EnvRules: envRules,
+			Layers: securitypolicy.Layers{
+				Elements: map[string]string{},
+			},
+		}
+		ref, err := name.ParseReference(configContainer.Name)
+		if err != nil {
+			return p, fmt.Errorf("'%s' isn't a valid image name", configContainer.Name)
 		}
 		img, err := remote.Image(ref, imageOptions...)
 		if err != nil {
-			return p, fmt.Errorf("unable to fetch image '%s': %s", image.Name, err.Error())
+			return p, fmt.Errorf("unable to fetch image '%s': %s", configContainer.Name, err.Error())
 		}
 
 		layers, err := img.Layers()
@@ -150,7 +176,7 @@ func createPolicyFromConfig(config Config) (sp.SecurityPolicy, error) {
 
 			opts := []tar2ext4.Option{
 				tar2ext4.ConvertWhiteout,
-				tar2ext4.MaximumDiskSize(128 * 1024 * 1024 * 1024),
+				tar2ext4.MaximumDiskSize(dmverity.RecommendedVHDSizeGB),
 			}
 
 			err = tar2ext4.Convert(r, out, opts...)
@@ -168,12 +194,97 @@ func createPolicyFromConfig(config Config) (sp.SecurityPolicy, error) {
 				return p, err
 			}
 			hash := dmverity.RootHash(tree)
-			hash_string := fmt.Sprintf("%x", hash)
-			container.Layers = append(container.Layers, hash_string)
+			hashString := fmt.Sprintf("%x", hash)
+			addLayer(&container.Layers, hashString)
 		}
 
-		p.Containers = append(p.Containers, container)
+		// add rules for all known environment variables from the configuration
+		// these are in addition to "other rules" from the policy definition file
+		config, err := img.ConfigFile()
+		if err != nil {
+			return p, err
+		}
+		for _, env := range config.Config.Env {
+			rule := securitypolicy.EnvRule{
+				Strategy: securitypolicy.EnvVarRuleString,
+				Rule:     env,
+			}
+
+			addEnvRule(&container.EnvRules, rule)
+		}
+
+		// cri adds TERM=xterm for all workload containers. we add to all containers
+		// to prevent any possble erroring
+		rule := securitypolicy.EnvRule{
+			Strategy: securitypolicy.EnvVarRuleString,
+			Rule:     "TERM=xterm",
+		}
+
+		addEnvRule(&container.EnvRules, rule)
+
+		addContainer(&p.Containers, container)
 	}
 
 	return p, nil
+}
+
+func validateEnvRules(rules []EnvironmentVariableRule) error {
+	for _, rule := range rules {
+		switch rule.Strategy {
+		case securitypolicy.EnvVarRuleRegex:
+			_, err := regexp.Compile(rule.Rule)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+func convertCommand(toml []string) securitypolicy.CommandArgs {
+	json := map[string]string{}
+
+	for i, arg := range toml {
+		json[strconv.Itoa(i)] = arg
+	}
+
+	return securitypolicy.CommandArgs{
+		Elements: json,
+	}
+}
+
+func convertEnvironmentVariableRules(toml []EnvironmentVariableRule) securitypolicy.EnvRules {
+	json := map[string]securitypolicy.EnvRule{}
+
+	for i, rule := range toml {
+		jsonRule := securitypolicy.EnvRule{
+			Strategy: rule.Strategy,
+			Rule:     rule.Rule,
+		}
+
+		json[strconv.Itoa(i)] = jsonRule
+	}
+
+	return securitypolicy.EnvRules{
+		Elements: json,
+	}
+}
+
+func addContainer(containers *securitypolicy.Containers, container securitypolicy.Container) {
+	index := strconv.Itoa(len(containers.Elements))
+
+	containers.Elements[index] = container
+}
+
+func addLayer(layers *securitypolicy.Layers, layer string) {
+	index := strconv.Itoa(len(layers.Elements))
+
+	layers.Elements[index] = layer
+}
+
+func addEnvRule(rules *securitypolicy.EnvRules, rule securitypolicy.EnvRule) {
+	index := strconv.Itoa(len(rules.Elements))
+
+	rules.Elements[index] = rule
 }

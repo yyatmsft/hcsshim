@@ -826,3 +826,182 @@ func Test_CreateContainer_DevShmSize(t *testing.T) {
 		t.Fatalf("expected the size of /dev/shm to be 64MB. Got output instead: %s", string(execResponse1.Stdout))
 	}
 }
+
+func Test_CreateContainer_HugePageMount_LCOW(t *testing.T) {
+	requireFeatures(t, featureLCOW)
+
+	client := newTestRuntimeClient(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	pullRequiredLcowImages(t, []string{imageLcowK8sPause, imageLcowAlpine})
+
+	annotations := map[string]string{
+		oci.AnnotationFullyPhysicallyBacked: "true",
+		oci.AnnotationMemorySizeInMB:        "2048",
+		oci.AnnotationKernelBootOptions:     "hugepagesz=2M hugepages=10",
+	}
+	sandboxRequest := getRunPodSandboxRequest(t, lcowRuntimeHandler, annotations)
+
+	podID := runPodSandbox(t, client, ctx, sandboxRequest)
+	defer removePodSandbox(t, client, ctx, podID)
+	defer stopPodSandbox(t, client, ctx, podID)
+
+	request := &runtime.CreateContainerRequest{
+		Config: &runtime.ContainerConfig{
+			Metadata: &runtime.ContainerMetadata{
+				Name: t.Name() + "-Container",
+			},
+			Image: &runtime.ImageSpec{
+				Image: imageLcowAlpine,
+			},
+			// Hold this command open until killed
+			Command: []string{
+				"top",
+			},
+			Mounts: []*runtime.Mount{
+				{
+					HostPath:      "hugepages://2M/hugepage2M",
+					ContainerPath: "/mnt/hugepage2M",
+					Readonly:      false,
+					Propagation:   runtime.MountPropagation_PROPAGATION_BIDIRECTIONAL,
+				},
+			},
+		},
+	}
+
+	request.PodSandboxId = podID
+	request.SandboxConfig = sandboxRequest.Config
+
+	containerId := createContainer(t, client, ctx, request)
+	defer removeContainer(t, client, ctx, containerId)
+	startContainer(t, client, ctx, containerId)
+	defer stopContainer(t, client, ctx, containerId)
+
+	execCommand := []string{"grep", "-i", "/mnt/hugepage2M", "/proc/mounts"}
+
+	output, errorMsg, exitCode := execContainer(t, client, ctx, containerId, execCommand)
+	if exitCode != 0 || len(errorMsg) > 0 {
+		t.Fatalf("failed to exec in hugepage container errorMsg: %s, exitcode: %v\n", errorMsg, exitCode)
+	}
+
+	if !strings.Contains(output, "hugetlbfs") {
+		t.Fatalf("output is supposed to contain hugetlbfs, output: %s", output)
+	}
+
+	if !strings.Contains(output, "pagesize=2M") {
+		t.Fatalf("output is supposed to contain pagesize=2M, output: %s", output)
+	}
+}
+
+func Test_RunContainer_ExecUser_LCOW(t *testing.T) {
+	requireFeatures(t, featureLCOW)
+
+	pullRequiredLcowImages(t, []string{imageLcowK8sPause, imageLcowCustomUser})
+
+	client := newTestRuntimeClient(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sandboxRequest := getRunPodSandboxRequest(t, lcowRuntimeHandler, nil)
+
+	podID := runPodSandbox(t, client, ctx, sandboxRequest)
+	defer removePodSandbox(t, client, ctx, podID)
+	defer stopPodSandbox(t, client, ctx, podID)
+
+	cmd := []string{"sh", "-c", "while true; do sleep 1; done"}
+	request := &runtime.CreateContainerRequest{
+		PodSandboxId: podID,
+		Config: &runtime.ContainerConfig{
+			Metadata: &runtime.ContainerMetadata{
+				Name: t.Name() + "-Container",
+			},
+			Image: &runtime.ImageSpec{
+				Image: imageLcowCustomUser,
+			},
+			Command: cmd,
+		},
+		SandboxConfig: sandboxRequest.Config,
+	}
+
+	containerID := createContainer(t, client, ctx, request)
+	defer removeContainer(t, client, ctx, containerID)
+	startContainer(t, client, ctx, containerID)
+	defer stopContainer(t, client, ctx, containerID)
+
+	// The `imageLcowCustomUser` image has a user created in the image named test that is set to run the init process as. This tests that
+	// any execed processes will honor the user set for the container also.
+	cmd = []string{"whoami"}
+	containerExecReq := &runtime.ExecSyncRequest{
+		ContainerId: containerID,
+		Cmd:         cmd,
+		Timeout:     20,
+	}
+	r := execSync(t, client, ctx, containerExecReq)
+	if r.ExitCode != 0 {
+		t.Fatalf("failed with exit code %d: %s", r.ExitCode, string(r.Stderr))
+	}
+
+	if !strings.Contains(string(r.Stdout), "test") {
+		t.Fatalf("expected user for exec to be 'test', got %q", string(r.Stdout))
+	}
+}
+
+func Test_RunContainer_ExecUser_Root_LCOW(t *testing.T) {
+	requireFeatures(t, featureLCOW)
+
+	pullRequiredLcowImages(t, []string{imageLcowK8sPause, imageLcowCustomUser})
+
+	client := newTestRuntimeClient(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sandboxRequest := getRunPodSandboxRequest(t, lcowRuntimeHandler, nil)
+
+	podID := runPodSandbox(t, client, ctx, sandboxRequest)
+	defer removePodSandbox(t, client, ctx, podID)
+	defer stopPodSandbox(t, client, ctx, podID)
+
+	// Overide what user to run the container as and see if the exec also runs as root now.
+	cmd := []string{"sh", "-c", "while true; do sleep 1; done"}
+	request := &runtime.CreateContainerRequest{
+		PodSandboxId: podID,
+		Config: &runtime.ContainerConfig{
+			Metadata: &runtime.ContainerMetadata{
+				Name: t.Name() + "-Container",
+			},
+			Image: &runtime.ImageSpec{
+				Image: imageLcowCustomUser,
+			},
+			Command: cmd,
+			Linux: &runtime.LinuxContainerConfig{
+				SecurityContext: &runtime.LinuxContainerSecurityContext{
+					RunAsUsername: "root",
+				},
+			},
+		},
+		SandboxConfig: sandboxRequest.Config,
+	}
+
+	containerID := createContainer(t, client, ctx, request)
+	defer removeContainer(t, client, ctx, containerID)
+	startContainer(t, client, ctx, containerID)
+	defer stopContainer(t, client, ctx, containerID)
+
+	// The `imageLcowCustomUser` image has a user created in the image named test that is set to run the init process as. This tests that
+	// any execed processes will honor the user set for the container also.
+	cmd = []string{"whoami"}
+	containerExecReq := &runtime.ExecSyncRequest{
+		ContainerId: containerID,
+		Cmd:         cmd,
+		Timeout:     20,
+	}
+	r := execSync(t, client, ctx, containerExecReq)
+	if r.ExitCode != 0 {
+		t.Fatalf("failed with exit code %d: %s", r.ExitCode, string(r.Stderr))
+	}
+
+	if !strings.Contains(string(r.Stdout), "root") {
+		t.Fatalf("expected user for exec to be 'root', got %q", string(r.Stdout))
+	}
+}
