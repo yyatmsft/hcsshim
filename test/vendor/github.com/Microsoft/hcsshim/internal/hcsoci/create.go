@@ -20,6 +20,7 @@ import (
 	"github.com/Microsoft/hcsshim/internal/resources"
 	"github.com/Microsoft/hcsshim/internal/schemaversion"
 	"github.com/Microsoft/hcsshim/internal/uvm"
+	"github.com/Microsoft/hcsshim/pkg/annotations"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sirupsen/logrus"
 )
@@ -97,13 +98,13 @@ func verifyCloneContainerSpecs(templateSpec, cloneSpec *specs.Spec) error {
 	}
 
 	// for annotations check that the values of memory & cpu annotations are same
-	if templateSpec.Annotations[oci.AnnotationContainerMemorySizeInMB] != cloneSpec.Annotations[oci.AnnotationContainerMemorySizeInMB] {
+	if templateSpec.Annotations[annotations.ContainerMemorySizeInMB] != cloneSpec.Annotations[annotations.ContainerMemorySizeInMB] {
 		return fmt.Errorf("memory size limit for template and clone containers can not be different")
 	}
-	if templateSpec.Annotations[oci.AnnotationContainerProcessorCount] != cloneSpec.Annotations[oci.AnnotationContainerProcessorCount] {
+	if templateSpec.Annotations[annotations.ContainerProcessorCount] != cloneSpec.Annotations[annotations.ContainerProcessorCount] {
 		return fmt.Errorf("processor count for template and clone containers can not be different")
 	}
-	if templateSpec.Annotations[oci.AnnotationContainerProcessorLimit] != cloneSpec.Annotations[oci.AnnotationContainerProcessorLimit] {
+	if templateSpec.Annotations[annotations.ContainerProcessorLimit] != cloneSpec.Annotations[annotations.ContainerProcessorLimit] {
 		return fmt.Errorf("processor limit for template and clone containers can not be different")
 	}
 
@@ -283,6 +284,14 @@ func CreateContainer(ctx context.Context, createOptions *CreateOptions) (_ cow.C
 			n := coi.HostingSystem.ContainerCounter()
 			r.SetContainerRootInUVM(fmt.Sprintf(wcowRootInUVM, strconv.FormatUint(n, 16)))
 		}
+		// install kernel drivers if necessary.
+		// do this before network setup in case any of the drivers requested are
+		// network drivers
+		driverClosers, err := installPodDrivers(ctx, coi.HostingSystem, coi.Spec.Annotations)
+		if err != nil {
+			return nil, r, err
+		}
+		r.Add(driverClosers...)
 	}
 
 	ct, _, err := oci.GetSandboxTypeAndID(coi.Spec.Annotations)

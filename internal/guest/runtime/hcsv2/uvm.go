@@ -26,6 +26,7 @@ import (
 	"github.com/Microsoft/hcsshim/internal/guest/storage/pmem"
 	"github.com/Microsoft/hcsshim/internal/guest/storage/scsi"
 	"github.com/Microsoft/hcsshim/internal/guest/transport"
+	"github.com/Microsoft/hcsshim/pkg/annotations"
 	"github.com/Microsoft/hcsshim/pkg/securitypolicy"
 	shellwords "github.com/mattn/go-shellwords"
 	"github.com/pkg/errors"
@@ -156,7 +157,7 @@ func (h *Host) CreateContainer(ctx context.Context, id string, settings *prot.VM
 	}
 
 	var namespaceID string
-	criType, isCRI := settings.OCISpecification.Annotations["io.kubernetes.cri.container-type"]
+	criType, isCRI := settings.OCISpecification.Annotations[annotations.KubernetesContainerType]
 	if isCRI {
 		switch criType {
 		case "sandbox":
@@ -180,7 +181,7 @@ func (h *Host) CreateContainer(ctx context.Context, id string, settings *prot.VM
 				return nil, err
 			}
 		case "container":
-			sid, ok := settings.OCISpecification.Annotations["io.kubernetes.cri.sandbox-id"]
+			sid, ok := settings.OCISpecification.Annotations[annotations.KubernetesSandboxID]
 			if !ok || sid == "" {
 				return nil, errors.Errorf("unsupported 'io.kubernetes.cri.sandbox-id': '%s'", sid)
 			}
@@ -206,6 +207,19 @@ func (h *Host) CreateContainer(ctx context.Context, id string, settings *prot.VM
 				_ = os.RemoveAll(getStandaloneRootDir(id))
 			}
 		}()
+	}
+
+	// Export security policy as one of the process's environment variables so that application and sidecar
+	// containers can have access to it. The security policy is required by containers which need to extract
+	// init-time claims found in the security policy.
+	//
+	// We append the variable after the security policy enforcing logic completes so as to bypass it; the
+	// security policy variable cannot be included in the security policy as its value is not available
+	// security policy construction time.
+
+	if policyEnforcer, ok := (h.securityPolicyEnforcer).(*securitypolicy.StandardSecurityPolicyEnforcer); ok {
+		secPolicyEnv := fmt.Sprintf("SECURITY_POLICY=%s", policyEnforcer.EncodedSecurityPolicy)
+		settings.OCISpecification.Process.Env = append(settings.OCISpecification.Process.Env, secPolicyEnv)
 	}
 
 	// Create the BundlePath
@@ -497,7 +511,7 @@ func modifyCombinedLayers(ctx context.Context, rt prot.ModifyRequestType, cl *pr
 			workdirPath = filepath.Join(cl.ScratchPath, "work")
 		}
 
-		return overlay.Mount(ctx, layerPaths, upperdirPath, workdirPath, cl.ContainerRootPath, readonly, cl.ContainerId, securityPolicy)
+		return overlay.MountLayer(ctx, layerPaths, upperdirPath, workdirPath, cl.ContainerRootPath, readonly, cl.ContainerId, securityPolicy)
 	case prot.MreqtRemove:
 		return storage.UnmountPath(ctx, cl.ContainerRootPath, true)
 	default:

@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/Microsoft/hcsshim/internal/log"
+	"github.com/Microsoft/hcsshim/pkg/annotations"
 	"github.com/opencontainers/runc/libcontainer/devices"
 	"github.com/opencontainers/runc/libcontainer/user"
 	oci "github.com/opencontainers/runtime-spec/specs-go"
@@ -197,7 +198,7 @@ func getGroup(spec *oci.Spec, filter func(user.Group) bool) (user.Group, error) 
 // applyAnnotationsToSpec modifies the spec based on additional information from annotations
 func applyAnnotationsToSpec(ctx context.Context, spec *oci.Spec) error {
 	// Check if we need to override container's /dev/shm
-	if val, ok := spec.Annotations["io.microsoft.container.storage.shm.size-kb"]; ok {
+	if val, ok := spec.Annotations[annotations.LCOWDevShmSizeInKb]; ok {
 		sz, err := strconv.ParseInt(val, 10, 64)
 		if err != nil {
 			return errors.Wrap(err, "/dev/shm size must be a valid integer")
@@ -220,8 +221,8 @@ func applyAnnotationsToSpec(ctx context.Context, spec *oci.Spec) error {
 	}
 
 	// Check if we need to do any capability/device mappings
-	if spec.Annotations["io.microsoft.virtualmachine.lcow.privileged"] == "true" {
-		log.G(ctx).Debug("'io.microsoft.virtualmachine.lcow.privileged' set for privileged container")
+	if spec.Annotations[annotations.LCOWPrivileged] == "true" {
+		log.G(ctx).Debugf("'%s' set for privileged container", annotations.LCOWPrivileged)
 
 		// Add all host devices
 		hostDevices, err := devices.HostDevices()
@@ -252,4 +253,59 @@ func applyAnnotationsToSpec(ctx context.Context, spec *oci.Spec) error {
 	}
 
 	return nil
+}
+
+// Helper function to create an oci prestart hook to run ldconfig
+func addLDConfigHook(ctx context.Context, spec *oci.Spec, args, env []string) error {
+	if spec.Hooks == nil {
+		spec.Hooks = &oci.Hooks{}
+	}
+
+	ldConfigHook := oci.Hook{
+		Path: "/sbin/ldconfig",
+		Args: args,
+		Env:  env,
+	}
+
+	spec.Hooks.Prestart = append(spec.Hooks.Prestart, ldConfigHook)
+	return nil
+}
+
+func addLinuxDeviceToSpec(ctx context.Context, hostDevice *devices.Device, spec *oci.Spec, addCgroupDevice bool) {
+	rd := oci.LinuxDevice{
+		Path:  hostDevice.Path,
+		Type:  string(hostDevice.Type),
+		Major: hostDevice.Major,
+		Minor: hostDevice.Minor,
+		UID:   &hostDevice.Uid,
+		GID:   &hostDevice.Gid,
+	}
+	if hostDevice.Major == 0 && hostDevice.Minor == 0 {
+		// Invalid device, most likely a symbolic link, skip it.
+		return
+	}
+	found := false
+	for i, dev := range spec.Linux.Devices {
+		if dev.Path == rd.Path {
+			found = true
+			spec.Linux.Devices[i] = rd
+			break
+		}
+		if dev.Type == rd.Type && dev.Major == rd.Major && dev.Minor == rd.Minor {
+			log.G(ctx).Warnf("The same type '%s', major '%d' and minor '%d', should not be used for multiple devices.", dev.Type, dev.Major, dev.Minor)
+		}
+	}
+	if !found {
+		spec.Linux.Devices = append(spec.Linux.Devices, rd)
+		if addCgroupDevice {
+			deviceCgroup := oci.LinuxDeviceCgroup{
+				Allow:  true,
+				Type:   string(hostDevice.Type),
+				Major:  &hostDevice.Major,
+				Minor:  &hostDevice.Minor,
+				Access: string(hostDevice.Permissions),
+			}
+			spec.Linux.Resources.Devices = append(spec.Linux.Resources.Devices, deviceCgroup)
+		}
+	}
 }

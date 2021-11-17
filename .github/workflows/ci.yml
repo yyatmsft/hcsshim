@@ -19,8 +19,9 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v2
         with:
-          version: v1.42.0 # Has fixes for stylecheck configuration https://github.com/golangci/golangci-lint/pull/2017/files
+          version: v1.42.1 # Has fixes for stylecheck configuration https://github.com/golangci/golangci-lint/pull/2017/files
           args: --timeout=5m -v
+          only-new-issues: true
 
   verify-main-vendor:
     runs-on: 'windows-2019'
@@ -40,7 +41,7 @@ jobs:
             Write-Error "Main modules are not up to date. Please validate your go version >= this job's and run `go mod vendor` followed by `go mod tidy` in the repo root path."
           }
           exit $process.ExitCode
-          
+
   verify-test-vendor:
     runs-on: 'windows-2019'
     env:
@@ -61,7 +62,10 @@ jobs:
           exit $process.ExitCode
 
   test:
-    runs-on: 'windows-2019'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [windows-2019, windows-2022]
     steps:
       - uses: actions/checkout@v2
       - uses: actions/setup-go@v2
@@ -84,7 +88,7 @@ jobs:
 
       - uses: actions/upload-artifact@v2
         with:
-          name: test_binaries
+          name: test_binaries_${{ matrix.os }}
           path: |
             test/containerd-shim-runhcs-v1.test.exe
             test/cri-containerd.test.exe
@@ -108,6 +112,7 @@ jobs:
       - run: go build ./cmd/ncproxy
       - run: go build ./cmd/dmverity-vhd
       - run: go build ./internal/tools/grantvmgroupaccess
+      - run: go build ./internal/tools/networkagent
       - run: go build ./internal/tools/securitypolicy
       - run: go build ./internal/tools/uvmboot
       - run: go build ./internal/tools/zapdir
@@ -122,6 +127,7 @@ jobs:
             device-util.exe
             wclayer.exe
             grantvmgroupaccess.exe
+            networkagent.exe
             uvmboot.exe
             zapdir.exe
             ncproxy.exe

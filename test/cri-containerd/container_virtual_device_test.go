@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Microsoft/hcsshim/internal/oci"
 	"github.com/Microsoft/hcsshim/osversion"
+	"github.com/Microsoft/hcsshim/pkg/annotations"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
 )
 
@@ -116,16 +116,16 @@ func findTestVirtualDeviceID() (string, error) {
 }
 
 var lcowPodGPUAnnotations = map[string]string{
-	oci.AnnotationKernelDirectBoot:    "false",
-	oci.AnnotationAllowOvercommit:     "false",
-	oci.AnnotationPreferredRootFSType: "initrd",
-	oci.AnnotationVPMemCount:          "0",
-	oci.AnnotationVPCIEnabled:         "true",
+	annotations.KernelDirectBoot:    "false",
+	annotations.AllowOvercommit:     "false",
+	annotations.PreferredRootFSType: "initrd",
+	annotations.VPMemCount:          "0",
+	annotations.VPCIEnabled:         "true",
 	// we believe this is a sufficiently large high MMIO space amount for this test.
 	// if a given gpu device needs more, this test will fail to create the container
 	// and may hang.
-	oci.AnnotationMemoryHighMMIOGapInMB: "64000",
-	oci.AnnotationBootFilesRootPath:     testGPUBootFiles,
+	annotations.MemoryHighMMIOGapInMB: "64000",
+	annotations.BootFilesRootPath:     testGPUBootFiles,
 }
 
 func getGPUContainerRequestLCOW(t *testing.T, podID string, podConfig *runtime.PodSandboxConfig, device *runtime.Device) *runtime.CreateContainerRequest {
@@ -145,7 +145,7 @@ func getGPUContainerRequestLCOW(t *testing.T, podID string, podConfig *runtime.P
 			},
 			Linux: &runtime.LinuxContainerConfig{},
 			Annotations: map[string]string{
-				"io.microsoft.container.gpu.capabilities": "utility",
+				annotations.ContainerGPUCapabilities: "utility",
 			},
 		},
 		PodSandboxId:  podID,
@@ -179,7 +179,7 @@ func getGPUContainerRequestWCOW(t *testing.T, podID string, podConfig *runtime.P
 				},
 			},
 			Annotations: map[string]string{
-				oci.AnnotationVirtualMachineKernelDrivers: testDriversPath,
+				annotations.VirtualMachineKernelDrivers: testDriversPath,
 			},
 		},
 		PodSandboxId:  podID,
@@ -202,14 +202,14 @@ func Test_RunContainer_VirtualDevice_GPU_LCOW(t *testing.T) {
 		t.Fatal("skipping test, host has no assignable nvidia gpu devices")
 	}
 
-	pullRequiredLcowImages(t, []string{imageLcowK8sPause, imageLcowAlpine})
+	pullRequiredLCOWImages(t, []string{imageLcowK8sPause, imageLcowAlpine})
 	client := newTestRuntimeClient(t)
 
 	podctx := context.Background()
 	sandboxRequest := getRunPodSandboxRequest(
 		t,
 		lcowRuntimeHandler,
-		lcowPodGPUAnnotations,
+		WithSandboxAnnotations(lcowPodGPUAnnotations),
 	)
 
 	podID := runPodSandbox(t, client, podctx, sandboxRequest)
@@ -247,14 +247,14 @@ func Test_RunContainer_VirtualDevice_GPU_Multiple_LCOW(t *testing.T) {
 		t.Fatal("skipping test, host has no assignable nvidia gpu devices")
 	}
 
-	pullRequiredLcowImages(t, []string{imageLcowK8sPause, imageLcowAlpine})
+	pullRequiredLCOWImages(t, []string{imageLcowK8sPause, imageLcowAlpine})
 	client := newTestRuntimeClient(t)
 
 	podctx := context.Background()
 	sandboxRequest := getRunPodSandboxRequest(
 		t,
 		lcowRuntimeHandler,
-		lcowPodGPUAnnotations,
+		WithSandboxAnnotations(lcowPodGPUAnnotations),
 	)
 
 	podID := runPodSandbox(t, client, podctx, sandboxRequest)
@@ -299,14 +299,14 @@ func Test_RunContainer_VirtualDevice_GPU_and_NoGPU_LCOW(t *testing.T) {
 		t.Fatal("skipping test, host has no assignable nvidia gpu devices")
 	}
 
-	pullRequiredLcowImages(t, []string{imageLcowK8sPause, imageLcowAlpine})
+	pullRequiredLCOWImages(t, []string{imageLcowK8sPause, imageLcowAlpine})
 	client := newTestRuntimeClient(t)
 
 	podctx := context.Background()
 	sandboxRequest := getRunPodSandboxRequest(
 		t,
 		lcowRuntimeHandler,
-		lcowPodGPUAnnotations,
+		WithSandboxAnnotations(lcowPodGPUAnnotations),
 	)
 
 	podID := runPodSandbox(t, client, podctx, sandboxRequest)
@@ -372,14 +372,14 @@ func Test_RunContainer_VirtualDevice_GPU_Multiple_Removal_LCOW(t *testing.T) {
 		t.Fatal("skipping test, host has no assignable nvidia gpu devices")
 	}
 
-	pullRequiredLcowImages(t, []string{imageLcowK8sPause, imageLcowAlpine})
+	pullRequiredLCOWImages(t, []string{imageLcowK8sPause, imageLcowAlpine})
 	client := newTestRuntimeClient(t)
 
 	podctx := context.Background()
 	sandboxRequest := getRunPodSandboxRequest(
 		t,
 		lcowRuntimeHandler,
-		lcowPodGPUAnnotations,
+		WithSandboxAnnotations(lcowPodGPUAnnotations),
 	)
 
 	podID := runPodSandbox(t, client, podctx, sandboxRequest)
@@ -426,7 +426,7 @@ func Test_RunContainer_VirtualDevice_LocationPath_WCOW_Process(t *testing.T) {
 	client := newTestRuntimeClient(t)
 
 	podctx := context.Background()
-	sandboxRequest := getRunPodSandboxRequest(t, wcowProcessRuntimeHandler, nil)
+	sandboxRequest := getRunPodSandboxRequest(t, wcowProcessRuntimeHandler)
 
 	podID := runPodSandbox(t, client, podctx, sandboxRequest)
 	defer removePodSandbox(t, client, podctx, podID)
@@ -467,7 +467,7 @@ func Test_RunContainer_VirtualDevice_ClassGUID_WCOW_Process(t *testing.T) {
 	client := newTestRuntimeClient(t)
 
 	podctx := context.Background()
-	sandboxRequest := getRunPodSandboxRequest(t, wcowProcessRuntimeHandler, nil)
+	sandboxRequest := getRunPodSandboxRequest(t, wcowProcessRuntimeHandler)
 
 	podID := runPodSandbox(t, client, podctx, sandboxRequest)
 	defer removePodSandbox(t, client, podctx, podID)
@@ -511,9 +511,9 @@ func Test_RunContainer_VirtualDevice_GPU_WCOW_Hypervisor(t *testing.T) {
 	sandboxRequest := getRunPodSandboxRequest(
 		t,
 		wcowHypervisorRuntimeHandler,
-		map[string]string{
-			oci.AnnotationFullyPhysicallyBacked: "true",
-		},
+		WithSandboxAnnotations(map[string]string{
+			annotations.FullyPhysicallyBacked: "true",
+		}),
 	)
 
 	podID := runPodSandbox(t, client, podctx, sandboxRequest)
@@ -559,9 +559,9 @@ func Test_RunContainer_VirtualDevice_GPU_and_NoGPU_WCOW_Hypervisor(t *testing.T)
 	sandboxRequest := getRunPodSandboxRequest(
 		t,
 		wcowHypervisorRuntimeHandler,
-		map[string]string{
-			oci.AnnotationFullyPhysicallyBacked: "true",
-		},
+		WithSandboxAnnotations(map[string]string{
+			annotations.FullyPhysicallyBacked: "true",
+		}),
 	)
 
 	podID := runPodSandbox(t, client, podctx, sandboxRequest)
@@ -624,9 +624,9 @@ func Test_RunContainer_VirtualDevice_GPU_Multiple_WCOW_Hypervisor(t *testing.T) 
 	sandboxRequest := getRunPodSandboxRequest(
 		t,
 		wcowHypervisorRuntimeHandler,
-		map[string]string{
-			oci.AnnotationFullyPhysicallyBacked: "true",
-		},
+		WithSandboxAnnotations(map[string]string{
+			annotations.FullyPhysicallyBacked: "true",
+		}),
 	)
 
 	podID := runPodSandbox(t, client, podctx, sandboxRequest)
@@ -679,9 +679,9 @@ func Test_RunContainer_VirtualDevice_GPU_Multiple_Removal_WCOW_Hypervisor(t *tes
 	sandboxRequest := getRunPodSandboxRequest(
 		t,
 		wcowHypervisorRuntimeHandler,
-		map[string]string{
-			oci.AnnotationFullyPhysicallyBacked: "true",
-		},
+		WithSandboxAnnotations(map[string]string{
+			annotations.FullyPhysicallyBacked: "true",
+		}),
 	)
 
 	podID := runPodSandbox(t, client, podctx, sandboxRequest)

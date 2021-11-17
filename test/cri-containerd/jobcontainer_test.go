@@ -1,3 +1,4 @@
+//go:build functional
 // +build functional
 
 package cri_containerd
@@ -15,23 +16,18 @@ import (
 
 	"github.com/Microsoft/go-winio/vhd"
 	"github.com/Microsoft/hcsshim/hcn"
-	"github.com/Microsoft/hcsshim/internal/oci"
+	"github.com/Microsoft/hcsshim/pkg/annotations"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
 )
 
 func getJobContainerPodRequestWCOW(t *testing.T) *runtime.RunPodSandboxRequest {
-	return &runtime.RunPodSandboxRequest{
-		Config: &runtime.PodSandboxConfig{
-			Metadata: &runtime.PodSandboxMetadata{
-				Name:      t.Name(),
-				Namespace: testNamespace,
-			},
-			Annotations: map[string]string{
-				oci.AnnotationHostProcessContainer: "true",
-			},
-		},
-		RuntimeHandler: wcowProcessRuntimeHandler,
-	}
+	return getRunPodSandboxRequest(
+		t,
+		wcowProcessRuntimeHandler,
+		WithSandboxAnnotations(map[string]string{
+			annotations.HostProcessContainer: "true",
+		}),
+	)
 }
 
 func getJobContainerRequestWCOW(t *testing.T, podID string, podConfig *runtime.PodSandboxConfig, image string, mounts []*runtime.Mount) *runtime.CreateContainerRequest {
@@ -52,8 +48,8 @@ func getJobContainerRequestWCOW(t *testing.T, podID string, podConfig *runtime.P
 			},
 			Mounts: mounts,
 			Annotations: map[string]string{
-				oci.AnnotationHostProcessContainer:   "true",
-				oci.AnnotationHostProcessInheritUser: "true",
+				annotations.HostProcessContainer:   "true",
+				annotations.HostProcessInheritUser: "true",
 			},
 			Windows: &runtime.WindowsContainerConfig{},
 		},
@@ -510,8 +506,8 @@ func Test_RunContainer_WorkingDirectory_JobContainer_WCOW(t *testing.T) {
 					Command:    test.cmd,
 					WorkingDir: test.workDir,
 					Annotations: map[string]string{
-						oci.AnnotationHostProcessContainer:   "true",
-						oci.AnnotationHostProcessInheritUser: "true",
+						annotations.HostProcessContainer:   "true",
+						annotations.HostProcessInheritUser: "true",
 					},
 					Windows: &runtime.WindowsContainerConfig{},
 				},
@@ -527,5 +523,44 @@ func Test_RunContainer_WorkingDirectory_JobContainer_WCOW(t *testing.T) {
 			startContainer(t, client, ctx, containerID)
 			defer stopContainer(t, client, ctx, containerID)
 		})
+	}
+}
+
+// Test of the fix for the behavior detailed here https://github.com/microsoft/hcsshim/issues/1199
+// The underlying issue was that we would escape the args passed to us to form a commandline, and then split the commandline back into args
+// to pass to exec.Cmd in the stdlib. exec.Cmd internally does escaping of its own and thus would result in double quoting for certain
+// commandlines.
+func Test_DoubleQuoting_JobContainer_WCOW(t *testing.T) {
+	requireFeatures(t, featureWCOWProcess, featureHostProcess)
+
+	pullRequiredImages(t, []string{imageJobContainerCmdline})
+	client := newTestRuntimeClient(t)
+
+	podctx := context.Background()
+	sandboxRequest := getJobContainerPodRequestWCOW(t)
+
+	podID := runPodSandbox(t, client, podctx, sandboxRequest)
+	defer removePodSandbox(t, client, podctx, podID)
+	defer stopPodSandbox(t, client, podctx, podID)
+
+	containerRequest := getJobContainerRequestWCOW(t, podID, sandboxRequest.Config, imageJobContainerCmdline, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	containerID := createContainer(t, client, ctx, containerRequest)
+	defer removeContainer(t, client, ctx, containerID)
+	startContainer(t, client, ctx, containerID)
+	defer stopContainer(t, client, ctx, containerID)
+
+	execResponse := execSync(t, client, ctx, &runtime.ExecSyncRequest{
+		ContainerId: containerID,
+		Cmd:         []string{"cmdline.exe", `"quote test"`},
+	})
+
+	expected := `cmdline.exe "quote test"`
+	// Check that there's no double quoting going on.
+	// e.g. `cmdline.exe ""quote test"" `
+	if string(execResponse.Stdout) != expected {
+		t.Fatalf("expected cmdline for exec to be %q but got %q", expected, string(execResponse.Stdout))
 	}
 }
