@@ -6,7 +6,7 @@ github.com/Microsoft/go-winio/pkg/guid
 github.com/Microsoft/go-winio/pkg/process
 github.com/Microsoft/go-winio/pkg/security
 github.com/Microsoft/go-winio/vhd
-# github.com/Microsoft/hcsshim v0.8.21 => ../
+# github.com/Microsoft/hcsshim v0.8.23 => ../
 ## explicit
 github.com/Microsoft/hcsshim
 github.com/Microsoft/hcsshim/cmd/containerd-shim-runhcs-v1/options
@@ -26,6 +26,7 @@ github.com/Microsoft/hcsshim/internal/cow
 github.com/Microsoft/hcsshim/internal/cpugroup
 github.com/Microsoft/hcsshim/internal/credentials
 github.com/Microsoft/hcsshim/internal/devices
+github.com/Microsoft/hcsshim/internal/extendedtask
 github.com/Microsoft/hcsshim/internal/gcs
 github.com/Microsoft/hcsshim/internal/guestrequest
 github.com/Microsoft/hcsshim/internal/hcs
@@ -43,6 +44,7 @@ github.com/Microsoft/hcsshim/internal/logfields
 github.com/Microsoft/hcsshim/internal/longpath
 github.com/Microsoft/hcsshim/internal/memory
 github.com/Microsoft/hcsshim/internal/mergemaps
+github.com/Microsoft/hcsshim/internal/ncproxy/networking
 github.com/Microsoft/hcsshim/internal/ncproxyttrpc
 github.com/Microsoft/hcsshim/internal/oc
 github.com/Microsoft/hcsshim/internal/oci
@@ -78,7 +80,7 @@ github.com/cenkalti/backoff/v4
 github.com/containerd/cgroups/stats/v1
 # github.com/containerd/console v1.0.2
 github.com/containerd/console
-# github.com/containerd/containerd v1.5.7
+# github.com/containerd/containerd v1.5.9
 ## explicit
 github.com/containerd/containerd
 github.com/containerd/containerd/api/events
@@ -197,8 +199,10 @@ github.com/moby/locker
 # github.com/moby/sys/mountinfo v0.4.1
 github.com/moby/sys/mountinfo
 # github.com/opencontainers/go-digest v1.0.0
+## explicit
 github.com/opencontainers/go-digest
-# github.com/opencontainers/image-spec v1.0.1
+# github.com/opencontainers/image-spec v1.0.2
+## explicit
 github.com/opencontainers/image-spec/identity
 github.com/opencontainers/image-spec/specs-go
 github.com/opencontainers/image-spec/specs-go/v1
@@ -252,7 +256,7 @@ golang.org/x/net/trace
 ## explicit
 golang.org/x/sync/errgroup
 golang.org/x/sync/semaphore
-# golang.org/x/sys v0.0.0-20210510120138-977fb7262007
+# golang.org/x/sys v0.0.0-20211216021012-1d35b9e2eb4e
 ## explicit
 golang.org/x/sys/internal/unsafeheader
 golang.org/x/sys/unix

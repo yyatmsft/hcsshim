@@ -89,8 +89,14 @@ type shimTask interface {
 	// If the host is hypervisor isolated and this task owns the host additional
 	// metrics on the UVM may be returned as well.
 	Stats(ctx context.Context) (*stats.Statistics, error)
+	// ProcessorInfo returns information on a task's compute system's processor settings
+	ProcessorInfo(ctx context.Context) (*processorInfo, error)
 	// Update updates a task's container
 	Update(ctx context.Context, req *task.UpdateTaskRequest) error
+}
+
+type processorInfo struct {
+	count int32
 }
 
 func verifyTaskUpdateResourcesType(data interface{}) error {
@@ -110,5 +116,6 @@ func isStatsNotFound(err error) bool {
 		hcs.IsNotExist(err) ||
 		hcs.IsOperationInvalidState(err) ||
 		gcs.IsNotExist(err) ||
-		hcs.IsAccessIsDenied(err)
+		hcs.IsAccessIsDenied(err) ||
+		hcs.IsErrorInvalidHandle(err)
 }

@@ -1,3 +1,4 @@
+//go:build functional
 // +build functional
 
 package functional
@@ -55,7 +56,7 @@ func TestVirtualDevice(t *testing.T) {
 	// create test uvm and ensure we can assign and remove the device
 	vm := testutilities.CreateLCOWUVMFromOpts(ctx, t, opts)
 	defer vm.Close()
-	vpci, err := vm.AssignDevice(ctx, testDeviceInstanceID, 0)
+	vpci, err := vm.AssignDevice(ctx, testDeviceInstanceID, 0, "")
 	if err != nil {
 		t.Fatalf("failed to assign device %s with %v", testDeviceInstanceID, err)
 	}

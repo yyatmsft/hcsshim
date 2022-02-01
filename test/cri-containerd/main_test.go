@@ -50,9 +50,10 @@ const (
 	imageLcowK8sPause        = "k8s.gcr.io/pause:3.1"
 	imageLcowAlpine          = "docker.io/library/alpine:latest"
 	imageLcowAlpineCoreDump  = "cplatpublic.azurecr.io/stackoverflow-alpine:latest"
-	imageWindowsProcessDump  = "cplatpublic.azurecr.io/crashdump:latest"
 	imageLcowCosmos          = "cosmosarno/spark-master:2.4.1_2019-04-18_8e864ce"
 	imageLcowCustomUser      = "cplatpublic.azurecr.io/linux_custom_user:latest"
+	imageWindowsProcessDump  = "cplatpublic.azurecr.io/crashdump:latest"
+	imageWindowsTimezone     = "cplatpublic.azurecr.io/timezone:latest"
 	imageJobContainerHNS     = "cplatpublic.azurecr.io/jobcontainer_hns:latest"
 	imageJobContainerETW     = "cplatpublic.azurecr.io/jobcontainer_etw:latest"
 	imageJobContainerVHD     = "cplatpublic.azurecr.io/jobcontainer_vhd:latest"
@@ -170,7 +171,16 @@ func getWindowsNanoserverImage(build uint16) string {
 		return "mcr.microsoft.com/windows/nanoserver:2004"
 	case osversion.V20H2:
 		return "mcr.microsoft.com/windows/nanoserver:2009"
+	case osversion.V21H2Server:
+		return "mcr.microsoft.com/windows/nanoserver:ltsc2022"
 	default:
+		// Due to some efforts in improving down-level compatibility for Windows containers (see
+		// https://techcommunity.microsoft.com/t5/containers/windows-server-2022-and-beyond-for-containers/ba-p/2712487)
+		// the ltsc2022 image should continue to work on builds ws2022 and onwards. With this in mind,
+		// if there's no mapping for the host build, just use the Windows Server 2022 image.
+		if build > osversion.V21H2Server {
+			return "mcr.microsoft.com/windows/nanoserver:ltsc2022"
+		}
 		panic("unsupported build")
 	}
 }
@@ -187,7 +197,16 @@ func getWindowsServerCoreImage(build uint16) string {
 		return "mcr.microsoft.com/windows/servercore:2004"
 	case osversion.V20H2:
 		return "mcr.microsoft.com/windows/servercore:2009"
+	case osversion.V21H2Server:
+		return "mcr.microsoft.com/windows/servercore:ltsc2022"
 	default:
+		// Due to some efforts in improving down-level compatibility for Windows containers (see
+		// https://techcommunity.microsoft.com/t5/containers/windows-server-2022-and-beyond-for-containers/ba-p/2712487)
+		// the ltsc2022 image should continue to work on builds ws2022 and onwards. With this in mind,
+		// if there's no mapping for the host build, just use the Windows Server 2022 image.
+		if build > osversion.V21H2Server {
+			return "mcr.microsoft.com/windows/servercore:ltsc2022"
+		}
 		panic("unsupported build")
 	}
 }

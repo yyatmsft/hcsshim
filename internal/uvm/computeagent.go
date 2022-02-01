@@ -5,11 +5,15 @@ import (
 	"strings"
 
 	"github.com/Microsoft/go-winio"
+	"github.com/Microsoft/hcsshim/hcn"
 	"github.com/Microsoft/hcsshim/internal/computeagent"
+	"github.com/Microsoft/hcsshim/internal/guestrequest"
 	hcsschema "github.com/Microsoft/hcsshim/internal/hcs/schema2"
 	"github.com/Microsoft/hcsshim/internal/hns"
+	ncproxynetworking "github.com/Microsoft/hcsshim/internal/ncproxy/networking"
 	"github.com/Microsoft/hcsshim/pkg/octtrpc"
 	"github.com/containerd/ttrpc"
+	"github.com/containerd/typeurl"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"google.golang.org/grpc/codes"
@@ -17,6 +21,13 @@ import (
 
 	"github.com/Microsoft/hcsshim/internal/log"
 )
+
+func init() {
+	typeurl.Register(&ncproxynetworking.Endpoint{}, "ncproxy/ncproxynetworking/Endpoint")
+	typeurl.Register(&ncproxynetworking.Network{}, "ncproxy/ncproxynetworking/Network")
+	typeurl.Register(&hcn.HostComputeEndpoint{}, "ncproxy/hcn/HostComputeEndpoint")
+	typeurl.Register(&hcn.HostComputeNetwork{}, "ncproxy/hcn/HostComputeNetwork")
+}
 
 // This file holds the implementation of the Compute Agent service that is exposed for
 // external network configuration.
@@ -28,6 +39,10 @@ type agentComputeSystem interface {
 	AddEndpointToNSWithID(context.Context, string, string, *hns.HNSEndpoint) error
 	UpdateNIC(context.Context, string, *hcsschema.NetworkAdapter) error
 	RemoveEndpointFromNS(context.Context, string, *hns.HNSEndpoint) error
+	AssignDevice(context.Context, string, uint16, string) (*VPCIDevice, error)
+	RemoveDevice(context.Context, string, uint16) error
+	AddNICInGuest(context.Context, *guestrequest.LCOWNetworkAdapter) error
+	RemoveNICInGuest(context.Context, *guestrequest.LCOWNetworkAdapter) error
 }
 
 var _ agentComputeSystem = &UtilityVM{}
@@ -43,61 +58,129 @@ type computeAgent struct {
 
 var _ computeagent.ComputeAgentService = &computeAgent{}
 
+func (ca *computeAgent) AssignPCI(ctx context.Context, req *computeagent.AssignPCIInternalRequest) (*computeagent.AssignPCIInternalResponse, error) {
+	log.G(ctx).WithFields(logrus.Fields{
+		"containerID":          req.ContainerID,
+		"deviceID":             req.DeviceID,
+		"virtualFunctionIndex": req.VirtualFunctionIndex,
+	}).Info("AssignPCI request")
+
+	if req.DeviceID == "" {
+		return nil, status.Error(codes.InvalidArgument, "received empty field in request")
+	}
+
+	dev, err := ca.uvm.AssignDevice(ctx, req.DeviceID, uint16(req.VirtualFunctionIndex), req.NicID)
+	if err != nil {
+		return nil, err
+	}
+	return &computeagent.AssignPCIInternalResponse{ID: dev.VMBusGUID}, nil
+}
+
+func (ca *computeAgent) RemovePCI(ctx context.Context, req *computeagent.RemovePCIInternalRequest) (*computeagent.RemovePCIInternalResponse, error) {
+	log.G(ctx).WithFields(logrus.Fields{
+		"containerID": req.ContainerID,
+		"deviceID":    req.DeviceID,
+	}).Info("RemovePCI request")
+
+	if req.DeviceID == "" {
+		return nil, status.Error(codes.InvalidArgument, "received empty field in request")
+	}
+	if err := ca.uvm.RemoveDevice(ctx, req.DeviceID, uint16(req.VirtualFunctionIndex)); err != nil {
+		return nil, err
+	}
+	return &computeagent.RemovePCIInternalResponse{}, nil
+}
+
 // AddNIC will add a NIC to the computeagent services hosting UVM.
 func (ca *computeAgent) AddNIC(ctx context.Context, req *computeagent.AddNICInternalRequest) (*computeagent.AddNICInternalResponse, error) {
 	log.G(ctx).WithFields(logrus.Fields{
 		"containerID": req.ContainerID,
-		"endpointID":  req.EndpointName,
+		"endpoint":    req.Endpoint,
 		"nicID":       req.NicID,
 	}).Info("AddNIC request")
 
-	if req.NicID == "" || req.EndpointName == "" {
+	if req.NicID == "" || req.Endpoint == nil {
 		return nil, status.Error(codes.InvalidArgument, "received empty field in request")
 	}
 
-	endpoint, err := hnsGetHNSEndpointByName(req.EndpointName)
+	endpoint, err := typeurl.UnmarshalAny(req.Endpoint)
 	if err != nil {
-		return nil, errors.Wrapf(err, "failed to get endpoint with name %q", req.EndpointName)
-	}
-	if err := ca.uvm.AddEndpointToNSWithID(ctx, endpoint.Namespace.ID, req.NicID, endpoint); err != nil {
 		return nil, err
 	}
+
+	switch endpt := endpoint.(type) {
+	case *ncproxynetworking.Endpoint:
+		cfg := &guestrequest.LCOWNetworkAdapter{
+			NamespaceID:    endpt.NamespaceID,
+			ID:             req.NicID,
+			IPAddress:      endpt.Settings.IPAddress,
+			PrefixLength:   uint8(endpt.Settings.IPAddressPrefixLength),
+			GatewayAddress: endpt.Settings.DefaultGateway,
+			VPCIAssigned:   true,
+		}
+		if err := ca.uvm.AddNICInGuest(ctx, cfg); err != nil {
+			return nil, err
+		}
+	case *hcn.HostComputeEndpoint:
+		hnsEndpoint, err := hnsGetHNSEndpointByName(endpt.Name)
+		if err != nil {
+			return nil, errors.Wrapf(err, "failed to get endpoint with name %q", endpt.Name)
+		}
+		if err := ca.uvm.AddEndpointToNSWithID(ctx, hnsEndpoint.Namespace.ID, req.NicID, hnsEndpoint); err != nil {
+			return nil, err
+		}
+	default:
+		return nil, status.Error(codes.InvalidArgument, "invalid request endpoint type")
+	}
+
 	return &computeagent.AddNICInternalResponse{}, nil
 }
 
 // ModifyNIC will modify a NIC from the computeagent services hosting UVM.
 func (ca *computeAgent) ModifyNIC(ctx context.Context, req *computeagent.ModifyNICInternalRequest) (*computeagent.ModifyNICInternalResponse, error) {
 	log.G(ctx).WithFields(logrus.Fields{
-		"nicID":        req.NicID,
-		"endpointName": req.EndpointName,
+		"nicID":    req.NicID,
+		"endpoint": req.Endpoint,
 	}).Info("ModifyNIC request")
 
-	if req.NicID == "" || req.EndpointName == "" || req.IovPolicySettings == nil {
+	if req.NicID == "" || req.Endpoint == nil || req.IovPolicySettings == nil {
 		return nil, status.Error(codes.InvalidArgument, "received empty field in request")
 	}
 
-	endpoint, err := hnsGetHNSEndpointByName(req.EndpointName)
+	endpoint, err := typeurl.UnmarshalAny(req.Endpoint)
 	if err != nil {
-		return nil, errors.Wrapf(err, "failed to get endpoint with name `%s`", req.EndpointName)
+		return nil, err
 	}
 
-	moderationValue := hcsschema.InterruptModerationValue(req.IovPolicySettings.InterruptModeration)
-	moderationName := hcsschema.InterruptModerationValueToName[moderationValue]
+	switch endpt := endpoint.(type) {
+	case *ncproxynetworking.Endpoint:
+		return nil, errors.New("modifying ncproxy networking endpoints is not supported")
+	case *hcn.HostComputeEndpoint:
+		hnsEndpoint, err := hnsGetHNSEndpointByName(endpt.Name)
+		if err != nil {
+			return nil, errors.Wrapf(err, "failed to get endpoint with name `%s`", endpt.Name)
+		}
 
-	iovSettings := &hcsschema.IovSettings{
-		OffloadWeight:       &req.IovPolicySettings.IovOffloadWeight,
-		QueuePairsRequested: &req.IovPolicySettings.QueuePairsRequested,
-		InterruptModeration: &moderationName,
-	}
+		moderationValue := hcsschema.InterruptModerationValue(req.IovPolicySettings.InterruptModeration)
+		moderationName := hcsschema.InterruptModerationValueToName[moderationValue]
 
-	nic := &hcsschema.NetworkAdapter{
-		EndpointId:  endpoint.Id,
-		MacAddress:  endpoint.MacAddress,
-		IovSettings: iovSettings,
-	}
+		iovSettings := &hcsschema.IovSettings{
+			OffloadWeight:       &req.IovPolicySettings.IovOffloadWeight,
+			QueuePairsRequested: &req.IovPolicySettings.QueuePairsRequested,
+			InterruptModeration: &moderationName,
+		}
 
-	if err := ca.uvm.UpdateNIC(ctx, req.NicID, nic); err != nil {
-		return nil, errors.Wrap(err, "failed to update UVM's network adapter")
+		nic := &hcsschema.NetworkAdapter{
+			EndpointId:  hnsEndpoint.Id,
+			MacAddress:  hnsEndpoint.MacAddress,
+			IovSettings: iovSettings,
+		}
+
+		if err := ca.uvm.UpdateNIC(ctx, req.NicID, nic); err != nil {
+			return nil, errors.Wrap(err, "failed to update UVM's network adapter")
+		}
+	default:
+		return nil, status.Error(codes.InvalidArgument, "invalid request endpoint type")
 	}
 
 	return &computeagent.ModifyNICInternalResponse{}, nil
@@ -106,23 +189,40 @@ func (ca *computeAgent) ModifyNIC(ctx context.Context, req *computeagent.ModifyN
 // DeleteNIC will delete a NIC from the computeagent services hosting UVM.
 func (ca *computeAgent) DeleteNIC(ctx context.Context, req *computeagent.DeleteNICInternalRequest) (*computeagent.DeleteNICInternalResponse, error) {
 	log.G(ctx).WithFields(logrus.Fields{
-		"containerID":  req.ContainerID,
-		"nicID":        req.NicID,
-		"endpointName": req.EndpointName,
+		"containerID": req.ContainerID,
+		"nicID":       req.NicID,
+		"endpoint":    req.Endpoint,
 	}).Info("DeleteNIC request")
 
-	if req.NicID == "" || req.EndpointName == "" {
+	if req.NicID == "" || req.Endpoint == nil {
 		return nil, status.Error(codes.InvalidArgument, "received empty field in request")
 	}
 
-	endpoint, err := hnsGetHNSEndpointByName(req.EndpointName)
+	endpoint, err := typeurl.UnmarshalAny(req.Endpoint)
 	if err != nil {
-		return nil, errors.Wrapf(err, "failed to get endpoint with name %q", req.EndpointName)
-	}
-
-	if err := ca.uvm.RemoveEndpointFromNS(ctx, endpoint.Namespace.ID, endpoint); err != nil {
 		return nil, err
 	}
+
+	switch endpt := endpoint.(type) {
+	case *ncproxynetworking.Endpoint:
+		cfg := &guestrequest.LCOWNetworkAdapter{
+			ID: req.NicID,
+		}
+		if err := ca.uvm.RemoveNICInGuest(ctx, cfg); err != nil {
+			return nil, err
+		}
+	case *hcn.HostComputeEndpoint:
+		hnsEndpoint, err := hnsGetHNSEndpointByName(endpt.Name)
+		if err != nil {
+			return nil, errors.Wrapf(err, "failed to get endpoint with name %q", endpt.Name)
+		}
+		if err := ca.uvm.RemoveEndpointFromNS(ctx, hnsEndpoint.Namespace.ID, hnsEndpoint); err != nil {
+			return nil, err
+		}
+	default:
+		return nil, status.Error(codes.InvalidArgument, "invalid request endpoint type")
+	}
+
 	return &computeagent.DeleteNICInternalResponse{}, nil
 }
 

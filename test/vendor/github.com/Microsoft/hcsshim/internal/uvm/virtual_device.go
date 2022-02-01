@@ -63,7 +63,7 @@ func (uvm *UtilityVM) GetAssignedDeviceVMBUSInstanceID(vmBusChannelGUID string) 
 
 // Release frees the resources of the corresponding vpci device
 func (vpci *VPCIDevice) Release(ctx context.Context) error {
-	if err := vpci.vm.removeDevice(ctx, vpci.deviceInstanceID, vpci.virtualFunctionIndex); err != nil {
+	if err := vpci.vm.RemoveDevice(ctx, vpci.deviceInstanceID, vpci.virtualFunctionIndex); err != nil {
 		return fmt.Errorf("failed to remove VPCI device: %s", err)
 	}
 	return nil
@@ -74,13 +74,16 @@ func (vpci *VPCIDevice) Release(ctx context.Context) error {
 // and the VPCIDevice is returned.
 // Otherwise, a new request is made to assign the target device indicated by the deviceID
 // onto the UVM. A new VPCIDevice entry is made on the UVM and the VPCIDevice is returned
-// to the caller
-func (uvm *UtilityVM) AssignDevice(ctx context.Context, deviceID string, index uint16) (*VPCIDevice, error) {
-	guid, err := guid.NewV4()
-	if err != nil {
-		return nil, err
+// to the caller.
+// Allow callers to specify the vmbus guid they want the device to show up with.
+func (uvm *UtilityVM) AssignDevice(ctx context.Context, deviceID string, index uint16, vmBusGUID string) (*VPCIDevice, error) {
+	if vmBusGUID == "" {
+		guid, err := guid.NewV4()
+		if err != nil {
+			return nil, err
+		}
+		vmBusGUID = guid.String()
 	}
-	vmBusGUID := guid.String()
 
 	key := VPCIDeviceKey{
 		deviceInstanceID:     deviceID,
@@ -140,10 +143,10 @@ func (uvm *UtilityVM) AssignDevice(ctx context.Context, deviceID string, index u
 	return result, nil
 }
 
-// removeDevice removes a vpci device from a uvm when there are
+// RemoveDevice removes a vpci device from a uvm when there are
 // no more references to a given VPCIDevice. Otherwise, decrements
 // the reference count of the stored VPCIDevice and returns nil.
-func (uvm *UtilityVM) removeDevice(ctx context.Context, deviceInstanceID string, index uint16) error {
+func (uvm *UtilityVM) RemoveDevice(ctx context.Context, deviceInstanceID string, index uint16) error {
 	key := VPCIDeviceKey{
 		deviceInstanceID:     deviceInstanceID,
 		virtualFunctionIndex: index,
