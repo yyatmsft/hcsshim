@@ -4,7 +4,7 @@
     "default": {
       "name": "default",
       "createdDate": "2021-06-18 22:27:56Z",
-      "lastUpdatedDate": "2021-11-17 01:35:22Z"
+      "lastUpdatedDate": "2022-03-30 17:51:09Z"
     }
   },
   "results": {
@@ -61,6 +61,34 @@
       "ruleId": "183125",
       "justification": "Not managed by Microsoft.",
       "createdDate": "2021-11-17 01:35:22Z",
+      "expirationDate": null,
+      "type": null
+    },
+    "289ad6623feefd8d5e65f37eb999c41a916e3bfbde81937b805f5486ebe7ad26": {
+      "signature": "289ad6623feefd8d5e65f37eb999c41a916e3bfbde81937b805f5486ebe7ad26",
+      "alternativeSignatures": [],
+      "target": "test/vendor/github.com/google/go-containerregistry/pkg/authn/README.md",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "credscan",
+      "ruleId": "CSCAN-GENERAL0060",
+      "justification": "Not managed by Microsoft.",
+      "createdDate": "2022-03-30 17:51:09Z",
+      "expirationDate": null,
+      "type": null
+    },
+    "4514086f28bfb6d8936f7accaa717c08e9158a079fe4de78b6dc3a6934ca8d29": {
+      "signature": "4514086f28bfb6d8936f7accaa717c08e9158a079fe4de78b6dc3a6934ca8d29",
+      "alternativeSignatures": [],
+      "target": "test/vendor/github.com/google/go-containerregistry/pkg/authn/README.md",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "credscan",
+      "ruleId": "CSCAN-GENERAL0060",
+      "justification": "Not managed by Microsoft.",
+      "createdDate": "2022-03-30 17:51:09Z",
       "expirationDate": null,
       "type": null
     }
