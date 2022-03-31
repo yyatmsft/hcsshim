@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/Microsoft/hcsshim/internal/guestrequest"
 	hcsschema "github.com/Microsoft/hcsshim/internal/hcs/schema2"
-	"github.com/Microsoft/hcsshim/internal/requesttype"
+	"github.com/Microsoft/hcsshim/internal/protocol/guestrequest"
+	"github.com/Microsoft/hcsshim/internal/protocol/guestresource"
 	"github.com/Microsoft/hcsshim/pkg/securitypolicy"
 )
 
@@ -20,22 +20,27 @@ func (uvm *UtilityVM) SetSecurityPolicy(ctx context.Context, policy string) erro
 	}
 
 	if policy == "" {
-		return nil
+		openDoorPolicy := securitypolicy.NewOpenDoorPolicy()
+		policyString, err := openDoorPolicy.EncodeToString()
+		if err != nil {
+			return err
+		}
+		policy = policyString
 	}
 
 	uvm.m.Lock()
 	defer uvm.m.Unlock()
 
 	modification := &hcsschema.ModifySettingRequest{
-		RequestType: requesttype.Add,
+		RequestType: guestrequest.RequestTypeAdd,
 		Settings: securitypolicy.EncodedSecurityPolicy{
 			SecurityPolicy: policy,
 		},
 	}
 
-	modification.GuestRequest = guestrequest.GuestRequest{
-		ResourceType: guestrequest.ResourceTypeSecurityPolicy,
-		RequestType:  requesttype.Add,
+	modification.GuestRequest = guestrequest.ModificationRequest{
+		ResourceType: guestresource.ResourceTypeSecurityPolicy,
+		RequestType:  guestrequest.RequestTypeAdd,
 		Settings: securitypolicy.EncodedSecurityPolicy{
 			SecurityPolicy: policy,
 		},

@@ -6,6 +6,9 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/pkg/errors"
+	"go.opencensus.io/trace"
+
 	"github.com/Microsoft/go-winio"
 	"github.com/Microsoft/go-winio/pkg/guid"
 	"github.com/Microsoft/hcsshim/internal/gcs"
@@ -14,13 +17,12 @@ import (
 	"github.com/Microsoft/hcsshim/internal/logfields"
 	"github.com/Microsoft/hcsshim/internal/oc"
 	"github.com/Microsoft/hcsshim/internal/processorinfo"
+	"github.com/Microsoft/hcsshim/internal/protocol/guestrequest"
 	"github.com/Microsoft/hcsshim/internal/schemaversion"
 	"github.com/Microsoft/hcsshim/internal/uvmfolder"
 	"github.com/Microsoft/hcsshim/internal/wclayer"
 	"github.com/Microsoft/hcsshim/internal/wcow"
 	"github.com/Microsoft/hcsshim/osversion"
-	"github.com/pkg/errors"
-	"go.opencensus.io/trace"
 )
 
 // OptionsWCOW are the set of options passed to CreateWCOW() to create a utility vm.
@@ -248,7 +250,7 @@ func CreateWCOW(ctx context.Context, opts *OptionsWCOW) (_ *UtilityVM, err error
 		id:                      opts.ID,
 		owner:                   opts.Owner,
 		operatingSystem:         "windows",
-		scsiControllerCount:     1,
+		scsiControllerCount:     opts.SCSIControllerCount,
 		vsmbDirShares:           make(map[string]*VSMBShare),
 		vsmbFileShares:          make(map[string]*VSMBShare),
 		vpciDevices:             make(map[VPCIDeviceKey]*VPCIDevice),
@@ -256,6 +258,7 @@ func CreateWCOW(ctx context.Context, opts *OptionsWCOW) (_ *UtilityVM, err error
 		physicallyBacked:        !opts.AllowOvercommit,
 		devicesPhysicallyBacked: opts.FullyPhysicallyBacked,
 		vsmbNoDirectMap:         opts.NoDirectMap,
+		noWritableFileShares:    opts.NoWritableFileShares,
 		createOpts:              *opts,
 	}
 
@@ -308,21 +311,23 @@ func CreateWCOW(ctx context.Context, opts *OptionsWCOW) (_ *UtilityVM, err error
 			}
 		}
 
-		doc.VirtualMachine.Devices.Scsi = map[string]hcsschema.Scsi{
-			"0": {
-				Attachments: map[string]hcsschema.Attachment{
-					"0": {
-						Path:  scratchPath,
-						Type_: "VirtualDisk",
-					},
-				},
-			},
+		doc.VirtualMachine.Devices.Scsi = map[string]hcsschema.Scsi{}
+		for i := 0; i < int(uvm.scsiControllerCount); i++ {
+			doc.VirtualMachine.Devices.Scsi[guestrequest.ScsiControllerGuids[i]] = hcsschema.Scsi{
+				Attachments: make(map[string]hcsschema.Attachment),
+			}
+		}
+
+		doc.VirtualMachine.Devices.Scsi[guestrequest.ScsiControllerGuids[0]].Attachments["0"] = hcsschema.Attachment{
+
+			Path:  scratchPath,
+			Type_: "VirtualDisk",
 		}
 
 		uvm.scsiLocations[0][0] = newSCSIMount(uvm,
-			doc.VirtualMachine.Devices.Scsi["0"].Attachments["0"].Path,
+			doc.VirtualMachine.Devices.Scsi[guestrequest.ScsiControllerGuids[0]].Attachments["0"].Path,
 			"",
-			doc.VirtualMachine.Devices.Scsi["0"].Attachments["0"].Type_,
+			doc.VirtualMachine.Devices.Scsi[guestrequest.ScsiControllerGuids[0]].Attachments["0"].Type_,
 			"",
 			1,
 			0,

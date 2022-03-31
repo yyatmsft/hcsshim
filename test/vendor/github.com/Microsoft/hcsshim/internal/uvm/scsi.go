@@ -8,19 +8,19 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"github.com/Microsoft/go-winio/pkg/security"
+	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
+
 	"github.com/Microsoft/hcsshim/internal/copyfile"
-	"github.com/Microsoft/hcsshim/internal/guestrequest"
 	"github.com/Microsoft/hcsshim/internal/hcs/resourcepaths"
 	hcsschema "github.com/Microsoft/hcsshim/internal/hcs/schema2"
 	"github.com/Microsoft/hcsshim/internal/log"
-	"github.com/Microsoft/hcsshim/internal/requesttype"
+	"github.com/Microsoft/hcsshim/internal/protocol/guestrequest"
+	"github.com/Microsoft/hcsshim/internal/protocol/guestresource"
 	"github.com/Microsoft/hcsshim/internal/wclayer"
-	"github.com/pkg/errors"
-	"github.com/sirupsen/logrus"
 )
 
 // VMAccessType is used to determine the various types of access we can
@@ -168,8 +168,8 @@ func newSCSIMount(
 // SCSI controllers associated with a utility VM to use.
 // Lock must be held when calling this function
 func (uvm *UtilityVM) allocateSCSISlot(ctx context.Context) (int, int, error) {
-	for controller, luns := range uvm.scsiLocations {
-		for lun, sm := range luns {
+	for controller := 0; controller < int(uvm.scsiControllerCount); controller++ {
+		for lun, sm := range uvm.scsiLocations[controller] {
 			// If sm is nil, we have found an open slot so we allocate a new SCSIMount
 			if sm == nil {
 				return controller, lun, nil
@@ -222,11 +222,11 @@ func (uvm *UtilityVM) RemoveSCSI(ctx context.Context, hostPath string) error {
 	}
 
 	scsiModification := &hcsschema.ModifySettingRequest{
-		RequestType:  requesttype.Remove,
-		ResourcePath: fmt.Sprintf(resourcepaths.SCSIResourceFormat, strconv.Itoa(sm.Controller), sm.LUN),
+		RequestType:  guestrequest.RequestTypeRemove,
+		ResourcePath: fmt.Sprintf(resourcepaths.SCSIResourceFormat, guestrequest.ScsiControllerGuids[sm.Controller], sm.LUN),
 	}
 
-	var verity *guestrequest.DeviceVerityInfo
+	var verity *guestresource.DeviceVerityInfo
 	if v, iErr := readVeritySuperBlock(ctx, hostPath); iErr != nil {
 		log.G(ctx).WithError(iErr).WithField("hostPath", sm.HostPath).Debug("unable to read dm-verity information from VHD")
 	} else {
@@ -246,19 +246,19 @@ func (uvm *UtilityVM) RemoveSCSI(ctx context.Context, hostPath string) error {
 	// so that we synchronize the guest state. This seems to always avoid SCSI
 	// related errors if this index quickly reused by another container.
 	if uvm.operatingSystem == "windows" && sm.UVMPath != "" {
-		scsiModification.GuestRequest = guestrequest.GuestRequest{
-			ResourceType: guestrequest.ResourceTypeMappedVirtualDisk,
-			RequestType:  requesttype.Remove,
-			Settings: guestrequest.WCOWMappedVirtualDisk{
+		scsiModification.GuestRequest = guestrequest.ModificationRequest{
+			ResourceType: guestresource.ResourceTypeMappedVirtualDisk,
+			RequestType:  guestrequest.RequestTypeRemove,
+			Settings: guestresource.WCOWMappedVirtualDisk{
 				ContainerPath: sm.UVMPath,
 				Lun:           sm.LUN,
 			},
 		}
 	} else {
-		scsiModification.GuestRequest = guestrequest.GuestRequest{
-			ResourceType: guestrequest.ResourceTypeMappedVirtualDisk,
-			RequestType:  requesttype.Remove,
-			Settings: guestrequest.LCOWMappedVirtualDisk{
+		scsiModification.GuestRequest = guestrequest.ModificationRequest{
+			ResourceType: guestresource.ResourceTypeMappedVirtualDisk,
+			RequestType:  guestrequest.RequestTypeRemove,
+			Settings: guestresource.LCOWMappedVirtualDisk{
 				MountPath:  sm.UVMPath, // May be blank in attach-only
 				Lun:        uint8(sm.LUN),
 				Controller: uint8(sm.Controller),
@@ -407,35 +407,30 @@ func (uvm *UtilityVM) addSCSIActual(ctx context.Context, addReq *addSCSIRequest)
 		return nil, ErrNoSCSIControllers
 	}
 
-	// Note: Can remove this check post-RS5 if multiple controllers are supported
-	if sm.Controller > 0 {
-		return nil, ErrTooManyAttachments
-	}
-
 	SCSIModification := &hcsschema.ModifySettingRequest{
-		RequestType: requesttype.Add,
+		RequestType: guestrequest.RequestTypeAdd,
 		Settings: hcsschema.Attachment{
 			Path:                      sm.HostPath,
 			Type_:                     addReq.attachmentType,
 			ReadOnly:                  addReq.readOnly,
 			ExtensibleVirtualDiskType: addReq.evdType,
 		},
-		ResourcePath: fmt.Sprintf(resourcepaths.SCSIResourceFormat, strconv.Itoa(sm.Controller), sm.LUN),
+		ResourcePath: fmt.Sprintf(resourcepaths.SCSIResourceFormat, guestrequest.ScsiControllerGuids[sm.Controller], sm.LUN),
 	}
 
 	if sm.UVMPath != "" {
-		guestReq := guestrequest.GuestRequest{
-			ResourceType: guestrequest.ResourceTypeMappedVirtualDisk,
-			RequestType:  requesttype.Add,
+		guestReq := guestrequest.ModificationRequest{
+			ResourceType: guestresource.ResourceTypeMappedVirtualDisk,
+			RequestType:  guestrequest.RequestTypeAdd,
 		}
 
 		if uvm.operatingSystem == "windows" {
-			guestReq.Settings = guestrequest.WCOWMappedVirtualDisk{
+			guestReq.Settings = guestresource.WCOWMappedVirtualDisk{
 				ContainerPath: sm.UVMPath,
 				Lun:           sm.LUN,
 			}
 		} else {
-			var verity *guestrequest.DeviceVerityInfo
+			var verity *guestresource.DeviceVerityInfo
 			if v, iErr := readVeritySuperBlock(ctx, sm.HostPath); iErr != nil {
 				log.G(ctx).WithError(iErr).WithField("hostPath", sm.HostPath).Debug("unable to read dm-verity information from VHD")
 			} else {
@@ -448,7 +443,7 @@ func (uvm *UtilityVM) addSCSIActual(ctx context.Context, addReq *addSCSIRequest)
 				verity = v
 			}
 
-			guestReq.Settings = guestrequest.LCOWMappedVirtualDisk{
+			guestReq.Settings = guestresource.LCOWMappedVirtualDisk{
 				MountPath:  sm.UVMPath,
 				Lun:        uint8(sm.LUN),
 				Controller: uint8(sm.Controller),
@@ -629,19 +624,19 @@ func (sm *SCSIMount) GobDecode(data []byte) error {
 
 // Clone function creates a clone of the SCSIMount `sm` and adds the cloned SCSIMount to
 // the uvm `vm`. If `sm` is read only then it is simply added to the `vm`. But if it is a
-// writeable mount(e.g a scratch layer) then a copy of it is made and that copy is added
+// writable mount(e.g a scratch layer) then a copy of it is made and that copy is added
 // to the `vm`.
 func (sm *SCSIMount) Clone(ctx context.Context, vm *UtilityVM, cd *cloneData) error {
 	var (
 		dstVhdPath string = sm.HostPath
 		err        error
 		dir        string
-		conStr     string = fmt.Sprintf("%d", sm.Controller)
+		conStr     string = guestrequest.ScsiControllerGuids[sm.Controller]
 		lunStr     string = fmt.Sprintf("%d", sm.LUN)
 	)
 
 	if !sm.readOnly {
-		// This is a writeable SCSI mount. It must be either the
+		// This is a writable SCSI mount. It must be either the
 		// 1. scratch VHD of the UVM or
 		// 2. scratch VHD of the container.
 		// A user provided writable SCSI mount is not allowed on the template UVM

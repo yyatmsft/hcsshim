@@ -3,8 +3,6 @@ package exec
 import (
 	"context"
 	"io"
-	"io/ioutil"
-	"log"
 	"os"
 	"path/filepath"
 	"testing"
@@ -39,11 +37,7 @@ func TestExec(t *testing.T) {
 
 func TestExecWithDir(t *testing.T) {
 	// Test that the working directory is successfully set to whatever was passed in.
-	dir, err := ioutil.TempDir("", "exec-test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(dir)
+	dir := t.TempDir()
 
 	e, err := New(
 		`C:\Windows\System32\cmd.exe`,
@@ -132,9 +126,9 @@ func TestExecStdinPowershell(t *testing.T) {
 
 func TestExecsWithJob(t *testing.T) {
 	// Test that we can assign processes to a job object at creation time.
-	job, err := jobobject.Create(context.Background(), &jobobject.Options{Name: "test"})
+	job, err := jobobject.Create(context.Background(), nil)
 	if err != nil {
-		log.Fatal(err)
+		t.Fatal(err)
 	}
 	defer job.Close()
 

@@ -14,19 +14,22 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Microsoft/hcsshim/internal/guest/bridge"
-	"github.com/Microsoft/hcsshim/internal/guest/kmsg"
-	"github.com/Microsoft/hcsshim/internal/guest/runtime/hcsv2"
-	"github.com/Microsoft/hcsshim/internal/guest/runtime/runc"
-	"github.com/Microsoft/hcsshim/internal/guest/transport"
-	"github.com/Microsoft/hcsshim/internal/oc"
-	"github.com/cenkalti/backoff/v4"
 	"github.com/containerd/cgroups"
 	cgroupstats "github.com/containerd/cgroups/stats/v1"
 	oci "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"go.opencensus.io/trace"
+
+	"github.com/Microsoft/hcsshim/internal/guest/bridge"
+	"github.com/Microsoft/hcsshim/internal/guest/kmsg"
+	"github.com/Microsoft/hcsshim/internal/guest/runtime/hcsv2"
+	"github.com/Microsoft/hcsshim/internal/guest/runtime/runc"
+	"github.com/Microsoft/hcsshim/internal/guest/transport"
+	"github.com/Microsoft/hcsshim/internal/guestpath"
+	"github.com/Microsoft/hcsshim/internal/log"
+	"github.com/Microsoft/hcsshim/internal/oc"
+	"github.com/cenkalti/backoff/v4"
 )
 
 func memoryLogFormat(metrics *cgroupstats.Metrics) logrus.Fields {
@@ -176,6 +179,7 @@ func main() {
 	rootMemReserveBytes := flag.Uint64("root-mem-reserve-bytes", 75*1024*1024, "the amount of memory reserved for the orchestration, the rest will be assigned to containers")
 	gcsMemLimitBytes := flag.Uint64("gcs-mem-limit-bytes", 50*1024*1024, "the maximum amount of memory the gcs can use")
 	disableTimeSync := flag.Bool("disable-time-sync", false, "If true do not run chronyd time synchronization service inside the UVM")
+	scrubLogs := flag.Bool("scrub-logs", false, "If true, scrub potentially sensitive information from logging")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "\nUsage of %s:\n", os.Args[0])
@@ -225,7 +229,9 @@ func main() {
 
 	logrus.SetLevel(level)
 
-	baseLogPath := "/run/gcs/c"
+	log.SetScrubbing(*scrubLogs)
+
+	baseLogPath := guestpath.LCOWRootPrefixInUVM
 
 	logrus.Info("GCS started")
 

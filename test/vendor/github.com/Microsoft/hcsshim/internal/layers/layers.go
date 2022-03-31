@@ -11,15 +11,17 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
+	"golang.org/x/sys/windows"
+
+	"github.com/Microsoft/hcsshim/internal/guestpath"
 	hcsschema "github.com/Microsoft/hcsshim/internal/hcs/schema2"
 	"github.com/Microsoft/hcsshim/internal/hcserror"
 	"github.com/Microsoft/hcsshim/internal/log"
 	"github.com/Microsoft/hcsshim/internal/ospath"
 	"github.com/Microsoft/hcsshim/internal/uvm"
 	"github.com/Microsoft/hcsshim/internal/wclayer"
-	"github.com/pkg/errors"
-	"github.com/sirupsen/logrus"
-	"golang.org/x/sys/windows"
 )
 
 // ImageLayers contains all the layers for an image.
@@ -77,7 +79,6 @@ func (layers *ImageLayers) Release(ctx context.Context, all bool) error {
 // 					  the host at `volumeMountPath`.
 //
 // TODO dcantah: Keep better track of the layers that are added, don't simply discard the SCSI, VSMB, etc. resource types gotten inside.
-
 func MountContainerLayers(ctx context.Context, containerID string, layerFolders []string, guestRoot string, volumeMountPath string, vm *uvm.UtilityVM) (_ string, err error) {
 	log.G(ctx).WithField("layerFolders", layerFolders).Debug("hcsshim::mountContainerLayers")
 
@@ -262,7 +263,7 @@ func MountContainerLayers(ctx context.Context, containerID string, layerFolders 
 		err = vm.CombineLayersWCOW(ctx, layers, containerScratchPathInUVM)
 		rootfs = containerScratchPathInUVM
 	} else {
-		rootfs = ospath.Join(vm.OS(), guestRoot, uvm.RootfsPath)
+		rootfs = ospath.Join(vm.OS(), guestRoot, guestpath.RootfsPath)
 		err = vm.CombineLayersLCOW(ctx, containerID, lcowUvmLayerPaths, containerScratchPathInUVM, rootfs)
 	}
 	if err != nil {
@@ -290,7 +291,7 @@ func addLCOWLayer(ctx context.Context, vm *uvm.UtilityVM, layerPath string) (uvm
 	}
 
 	options := []string{"ro"}
-	uvmPath = fmt.Sprintf(uvm.LCOWGlobalMountPrefix, vm.UVMMountCounter())
+	uvmPath = fmt.Sprintf(guestpath.LCOWGlobalMountPrefixFmt, vm.UVMMountCounter())
 	sm, err := vm.AddSCSI(ctx, layerPath, uvmPath, true, false, options, uvm.VMAccessTypeNoop)
 	if err != nil {
 		return "", fmt.Errorf("failed to add SCSI layer: %s", err)
@@ -461,7 +462,7 @@ func containerRootfsPath(vm *uvm.UtilityVM, rootPath string) string {
 	if vm.OS() == "windows" {
 		return ospath.Join(vm.OS(), rootPath)
 	}
-	return ospath.Join(vm.OS(), rootPath, uvm.RootfsPath)
+	return ospath.Join(vm.OS(), rootPath, guestpath.RootfsPath)
 }
 
 func getScratchVHDPath(layerFolders []string) (string, error) {

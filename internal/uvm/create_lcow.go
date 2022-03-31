@@ -23,6 +23,7 @@ import (
 	"github.com/Microsoft/hcsshim/internal/logfields"
 	"github.com/Microsoft/hcsshim/internal/oc"
 	"github.com/Microsoft/hcsshim/internal/processorinfo"
+	"github.com/Microsoft/hcsshim/internal/protocol/guestrequest"
 	"github.com/Microsoft/hcsshim/internal/schemaversion"
 	"github.com/Microsoft/hcsshim/osversion"
 )
@@ -86,7 +87,6 @@ type OptionsLCOW struct {
 	KernelBootOptions       string              // Additional boot options for the kernel
 	EnableGraphicsConsole   bool                // If true, enable a graphics console for the utility VM
 	ConsolePipe             string              // The named pipe path to use for the serial console.  eg \\.\pipe\vmpipe
-	SCSIControllerCount     uint32              // The number of SCSI controllers. Defaults to 1. Currently we only support 0 or 1.
 	UseGuestConnection      bool                // Whether the HCS should connect to the UVM's GCS. Defaults to true
 	ExecCommandLine         string              // The command line to exec from init. Defaults to GCS
 	ForwardStdout           bool                // Whether stdout will be forwarded from the executed program. Defaults to false
@@ -137,7 +137,6 @@ func NewDefaultOptionsLCOW(id, owner string) *OptionsLCOW {
 		KernelBootOptions:       "",
 		EnableGraphicsConsole:   false,
 		ConsolePipe:             "",
-		SCSIControllerCount:     1,
 		UseGuestConnection:      true,
 		ExecCommandLine:         fmt.Sprintf("/bin/gcs -v4 -log-format json -loglevel %s", logrus.StandardLogger().Level.String()),
 		ForwardStdout:           false,
@@ -257,14 +256,13 @@ Example JSON document produced once the hcsschema.ComputeSytem returned by makeL
         },
         "GuestState": {
             "GuestStateFilePath": "d:\\ken\\aug27\\gcsinitnew.vmgs",
-            "GuestStateFileType": "BlockStorage",
+            "GuestStateFileType": "FileMode",
 			"ForceTransientState": true
         },
         "SecuritySettings": {
             "Isolation": {
                 "IsolationType": "SecureNestedPaging",
-                "LaunchData": "kBifgKNijdHjxdSUshmavrNofo2B01LiIi1cr8R4ytI=",
-                "HclEnabled": true
+                "LaunchData": "kBifgKNijdHjxdSUshmavrNofo2B01LiIi1cr8R4ytI="
             }
         },
         "Version": {
@@ -353,11 +351,11 @@ func makeLCOWVMGSDoc(ctx context.Context, opts *OptionsLCOW, uvm *UtilityVM) (_ 
 	}
 
 	if uvm.scsiControllerCount > 0 {
-		// TODO: JTERRY75 - this should enumerate scsicount and add an entry per value.
-		doc.VirtualMachine.Devices.Scsi = map[string]hcsschema.Scsi{
-			"0": {
+		doc.VirtualMachine.Devices.Scsi = map[string]hcsschema.Scsi{}
+		for i := 0; i < int(uvm.scsiControllerCount); i++ {
+			doc.VirtualMachine.Devices.Scsi[guestrequest.ScsiControllerGuids[i]] = hcsschema.Scsi{
 				Attachments: make(map[string]hcsschema.Attachment),
-			},
+			}
 		}
 	}
 
@@ -381,7 +379,7 @@ func makeLCOWVMGSDoc(ctx context.Context, opts *OptionsLCOW, uvm *UtilityVM) (_ 
 
 	doc.VirtualMachine.GuestState = &hcsschema.GuestState{
 		GuestStateFilePath:  vmgsFullPath,
-		GuestStateFileType:  "BlockStorage",
+		GuestStateFileType:  "FileMode",
 		ForceTransientState: true, // tell HCS that this is just the source of the images, not ongoing state
 	}
 
@@ -426,7 +424,7 @@ func makeLCOWSecurityDoc(ctx context.Context, opts *OptionsLCOW, uvm *UtilityVM)
 		Isolation: &hcsschema.IsolationSettings{
 			IsolationType: "SecureNestedPaging",
 			LaunchData:    securityPolicyHash,
-			HclEnabled:    true,
+			// HclEnabled:    true, /* Not available in schema 2.5 - REQUIRED when using BlockStorage in 2.6 */
 		},
 	}
 
@@ -538,13 +536,14 @@ func makeLCOWDoc(ctx context.Context, opts *OptionsLCOW, uvm *UtilityVM) (_ *hcs
 	}
 
 	if uvm.scsiControllerCount > 0 {
-		// TODO: JTERRY75 - this should enumerate scsicount and add an entry per value.
-		doc.VirtualMachine.Devices.Scsi = map[string]hcsschema.Scsi{
-			"0": {
+		doc.VirtualMachine.Devices.Scsi = map[string]hcsschema.Scsi{}
+		for i := 0; i < int(uvm.scsiControllerCount); i++ {
+			doc.VirtualMachine.Devices.Scsi[guestrequest.ScsiControllerGuids[i]] = hcsschema.Scsi{
 				Attachments: make(map[string]hcsschema.Attachment),
-			},
+			}
 		}
 	}
+
 	if uvm.vpmemMaxCount > 0 {
 		doc.VirtualMachine.Devices.VirtualPMem = &hcsschema.VirtualPMemController{
 			MaximumCount:     uvm.vpmemMaxCount,
@@ -559,48 +558,59 @@ func makeLCOWDoc(ctx context.Context, opts *OptionsLCOW, uvm *UtilityVM) (_ *hcs
 			kernelArgs = "initrd=/" + opts.RootFSFile
 		}
 	case PreferredRootFSTypeVHD:
-		// Support for VPMem VHD(X) booting rather than initrd..
-		kernelArgs = "root=/dev/pmem0 ro rootwait init=/init"
-		imageFormat := "Vhd1"
-		if strings.ToLower(filepath.Ext(opts.RootFSFile)) == "vhdx" {
-			imageFormat = "Vhdx"
-		}
-		doc.VirtualMachine.Devices.VirtualPMem.Devices = map[string]hcsschema.VirtualPMemDevice{
-			"0": {
-				HostPath:    rootfsFullPath,
-				ReadOnly:    true,
-				ImageFormat: imageFormat,
-			},
-		}
-		if uvm.vpmemMultiMapping {
-			pmem := newPackedVPMemDevice()
-			pmem.maxMappedDeviceCount = 1
+		if uvm.vpmemMaxCount > 0 {
+			// Support for VPMem VHD(X) booting rather than initrd..
+			kernelArgs = "root=/dev/pmem0 ro rootwait init=/init"
+			imageFormat := "Vhd1"
+			if strings.ToLower(filepath.Ext(opts.RootFSFile)) == "vhdx" {
+				imageFormat = "Vhdx"
+			}
+			doc.VirtualMachine.Devices.VirtualPMem.Devices = map[string]hcsschema.VirtualPMemDevice{
+				"0": {
+					HostPath:    rootfsFullPath,
+					ReadOnly:    true,
+					ImageFormat: imageFormat,
+				},
+			}
+			if uvm.vpmemMultiMapping {
+				pmem := newPackedVPMemDevice()
+				pmem.maxMappedDeviceCount = 1
 
-			st, err := os.Stat(rootfsFullPath)
-			if err != nil {
-				return nil, errors.Wrapf(err, "failed to stat rootfs: %q", rootfsFullPath)
-			}
-			devSize := pageAlign(uint64(st.Size()))
-			memReg, err := pmem.Allocate(devSize)
-			if err != nil {
-				return nil, errors.Wrap(err, "failed to allocate memory for rootfs")
-			}
-			defer func() {
+				st, err := os.Stat(rootfsFullPath)
 				if err != nil {
-					if err = pmem.Release(memReg); err != nil {
-						log.G(ctx).WithError(err).Debug("failed to release memory region")
-					}
+					return nil, errors.Wrapf(err, "failed to stat rootfs: %q", rootfsFullPath)
 				}
-			}()
+				devSize := pageAlign(uint64(st.Size()))
+				memReg, err := pmem.Allocate(devSize)
+				if err != nil {
+					return nil, errors.Wrap(err, "failed to allocate memory for rootfs")
+				}
+				defer func() {
+					if err != nil {
+						if err = pmem.Release(memReg); err != nil {
+							log.G(ctx).WithError(err).Debug("failed to release memory region")
+						}
+					}
+				}()
 
-			dev := newVPMemMappedDevice(opts.RootFSFile, "/", devSize, memReg)
-			if err := pmem.mapVHDLayer(ctx, dev); err != nil {
-				return nil, errors.Wrapf(err, "failed to save internal state for a multi-mapped rootfs device")
+				dev := newVPMemMappedDevice(opts.RootFSFile, "/", devSize, memReg)
+				if err := pmem.mapVHDLayer(ctx, dev); err != nil {
+					return nil, errors.Wrapf(err, "failed to save internal state for a multi-mapped rootfs device")
+				}
+				uvm.vpmemDevicesMultiMapped[0] = pmem
+			} else {
+				dev := newDefaultVPMemInfo(opts.RootFSFile, "/")
+				uvm.vpmemDevicesDefault[0] = dev
 			}
-			uvm.vpmemDevicesMultiMapped[0] = pmem
 		} else {
-			dev := newDefaultVPMemInfo(opts.RootFSFile, "/")
-			uvm.vpmemDevicesDefault[0] = dev
+			kernelArgs = "root=/dev/sda ro rootwait init=/init"
+			doc.VirtualMachine.Devices.Scsi[guestrequest.ScsiControllerGuids[0]].Attachments["0"] = hcsschema.Attachment{
+				Type_:    "VirtualDisk",
+				Path:     rootfsFullPath,
+				ReadOnly: true,
+			}
+			uvm.scsiLocations[0][0] = newSCSIMount(uvm, rootfsFullPath, "/", "VirtualDisk", "", 1, 0, 0, true, false)
+
 		}
 	}
 
@@ -640,33 +650,38 @@ func makeLCOWDoc(ctx context.Context, opts *OptionsLCOW, uvm *UtilityVM) (_ *hcs
 	}
 
 	// Inject initial entropy over vsock during init launch.
-	initArgs := fmt.Sprintf("-e %d", entropyVsockPort)
+	entropyArgs := fmt.Sprintf("-e %d", entropyVsockPort)
 
 	// With default options, run GCS with stderr pointing to the vsock port
 	// created below in order to forward guest logs to logrus.
-	initArgs += " /bin/vsockexec"
+	execCmdArgs := "/bin/vsockexec"
 
 	if opts.ForwardStdout {
-		initArgs += fmt.Sprintf(" -o %d", linuxLogVsockPort)
+		execCmdArgs += fmt.Sprintf(" -o %d", linuxLogVsockPort)
 	}
 
 	if opts.ForwardStderr {
-		initArgs += fmt.Sprintf(" -e %d", linuxLogVsockPort)
+		execCmdArgs += fmt.Sprintf(" -e %d", linuxLogVsockPort)
 	}
 
 	if opts.DisableTimeSyncService {
 		opts.ExecCommandLine = fmt.Sprintf("%s --disable-time-sync", opts.ExecCommandLine)
 	}
 
-	initArgs += " " + opts.ExecCommandLine
-
-	if opts.ProcessDumpLocation != "" {
-		initArgs += " -core-dump-location " + opts.ProcessDumpLocation
+	if log.IsScrubbingEnabled() {
+		opts.ExecCommandLine += " --scrub-logs"
 	}
 
+	execCmdArgs += " " + opts.ExecCommandLine
+
+	if opts.ProcessDumpLocation != "" {
+		execCmdArgs += " -core-dump-location " + opts.ProcessDumpLocation
+	}
+
+	initArgs := fmt.Sprintf("%s %s", entropyArgs, execCmdArgs)
 	if vmDebugging {
 		// Launch a shell on the console.
-		initArgs = `sh -c "` + initArgs + ` & exec sh"`
+		initArgs = entropyArgs + ` sh -c "` + execCmdArgs + ` & exec sh"`
 	}
 
 	kernelArgs += fmt.Sprintf(" nr_cpus=%d", opts.ProcessorCount)
@@ -693,8 +708,9 @@ func makeLCOWDoc(ctx context.Context, opts *OptionsLCOW, uvm *UtilityVM) (_ *hcs
 	return doc, nil
 }
 
-// Creates an HCS compute system representing a utility VM. It consumes a set of options derived
-// from various defaults and options expressed as annotations.
+// CreateLCOW creates an HCS compute system representing a utility VM. It
+// consumes a set of options derived from various defaults and options
+// expressed as annotations.
 func CreateLCOW(ctx context.Context, opts *OptionsLCOW) (_ *UtilityVM, err error) {
 	ctx, span := trace.StartSpan(ctx, "uvm::CreateLCOW")
 	defer span.End()
@@ -729,6 +745,7 @@ func CreateLCOW(ctx context.Context, opts *OptionsLCOW) (_ *UtilityVM, err error
 		createOpts:              opts,
 		vpmemMultiMapping:       !opts.VPMemNoMultiMapping,
 		encryptScratch:          opts.EnableScratchEncryption,
+		noWritableFileShares:    opts.NoWritableFileShares,
 	}
 
 	defer func() {
@@ -736,6 +753,12 @@ func CreateLCOW(ctx context.Context, opts *OptionsLCOW) (_ *UtilityVM, err error
 			uvm.Close()
 		}
 	}()
+
+	// vpmemMaxCount has been set to 0 which means we are going to need multiple SCSI controllers
+	// to support lots of layers.
+	if osversion.Build() >= osversion.RS5 && uvm.vpmemMaxCount == 0 {
+		uvm.scsiControllerCount = 4
+	}
 
 	if err = verifyOptions(ctx, opts); err != nil {
 		return nil, errors.Wrap(err, errBadUVMOpts.Error())

@@ -8,6 +8,10 @@ import (
 	"path/filepath"
 	"runtime"
 
+	"github.com/sirupsen/logrus"
+	"go.opencensus.io/trace"
+	"golang.org/x/sys/windows"
+
 	"github.com/Microsoft/hcsshim/internal/cow"
 	"github.com/Microsoft/hcsshim/internal/hcs"
 	hcsschema "github.com/Microsoft/hcsshim/internal/hcs/schema2"
@@ -16,9 +20,6 @@ import (
 	"github.com/Microsoft/hcsshim/internal/oc"
 	"github.com/Microsoft/hcsshim/internal/schemaversion"
 	"github.com/Microsoft/hcsshim/osversion"
-	"github.com/sirupsen/logrus"
-	"go.opencensus.io/trace"
-	"golang.org/x/sys/windows"
 )
 
 // Options are the set of options passed to Create() to create a utility vm.
@@ -90,6 +91,12 @@ type Options struct {
 	// applied to all containers. On Windows it's configurable per container, but we can mimic this for
 	// Windows by just applying the location specified here per container.
 	ProcessDumpLocation string
+
+	// NoWritableFileShares disables adding any writable vSMB and Plan9 shares to the UVM
+	NoWritableFileShares bool
+
+	// The number of SCSI controllers. Defaults to 1 for WCOW and 4 for LCOW
+	SCSIControllerCount uint32
 }
 
 // compares the create opts used during template creation with the create opts
@@ -127,8 +134,8 @@ func verifyOptions(ctx context.Context, options interface{}) error {
 		if opts.EnableDeferredCommit && !opts.AllowOvercommit {
 			return errors.New("EnableDeferredCommit is not supported on physically backed VMs")
 		}
-		if opts.SCSIControllerCount > 1 {
-			return errors.New("SCSI controller count must be 0 or 1") // Future extension here for up to 4
+		if opts.SCSIControllerCount > MaxSCSIControllers {
+			return fmt.Errorf("SCSI controller count can't be more than %d", MaxSCSIControllers)
 		}
 		if opts.VPMemDeviceCount > MaxVPMEMCount {
 			return fmt.Errorf("VPMem device count cannot be greater than %d", MaxVPMEMCount)
@@ -136,10 +143,6 @@ func verifyOptions(ctx context.Context, options interface{}) error {
 		if opts.VPMemDeviceCount > 0 {
 			if opts.VPMemSizeBytes%4096 != 0 {
 				return errors.New("VPMemSizeBytes must be a multiple of 4096")
-			}
-		} else {
-			if opts.PreferredRootFSType == PreferredRootFSTypeVHD {
-				return errors.New("PreferredRootFSTypeVHD requires at least one VPMem device")
 			}
 		}
 		if opts.KernelDirect && osversion.Build() < 18286 {
@@ -155,6 +158,9 @@ func verifyOptions(ctx context.Context, options interface{}) error {
 		}
 		if len(opts.LayerFolders) < 2 {
 			return errors.New("at least 2 LayerFolders must be supplied")
+		}
+		if opts.SCSIControllerCount != 1 {
+			return errors.New("exactly 1 SCSI controller is required for WCOW")
 		}
 		if opts.IsClone && !verifyCloneUvmCreateOpts(&opts.TemplateConfig.CreateOpts, opts) {
 			return errors.New("clone configuration doesn't match with template configuration")
@@ -183,6 +189,8 @@ func newDefaultOptions(id, owner string) *Options {
 		EnableDeferredCommit:  false,
 		ProcessorCount:        defaultProcessorCount(),
 		FullyPhysicallyBacked: false,
+		NoWritableFileShares:  false,
+		SCSIControllerCount:   1,
 	}
 
 	if opts.Owner == "" {
@@ -379,6 +387,10 @@ func (uvm *UtilityVM) DevicesPhysicallyBacked() bool {
 // VSMBNoDirectMap returns if VSMB devices should be mounted with `NoDirectMap` set to true
 func (uvm *UtilityVM) VSMBNoDirectMap() bool {
 	return uvm.vsmbNoDirectMap
+}
+
+func (uvm *UtilityVM) NoWritableFileShares() bool {
+	return uvm.noWritableFileShares
 }
 
 // Closes the external GCS connection if it is being used and also closes the

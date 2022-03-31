@@ -3,18 +3,25 @@ package securitypolicy
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 
+	"github.com/Microsoft/hcsshim/internal/hooks"
+	"github.com/Microsoft/hcsshim/pkg/annotations"
 	"github.com/google/go-cmp/cmp"
+	oci "github.com/opencontainers/runtime-spec/specs-go"
 )
 
 type SecurityPolicyEnforcer interface {
 	EnforceDeviceMountPolicy(target string, deviceHash string) (err error)
 	EnforceDeviceUnmountPolicy(unmountTarget string) (err error)
 	EnforceOverlayMountPolicy(containerID string, layerPaths []string) (err error)
-	EnforceCreateContainerPolicy(containerID string, argList []string, envList []string) (err error)
+	EnforceCreateContainerPolicy(containerID string, argList []string, envList []string, workingDir string) (err error)
+	EnforceExpectedMountsPolicy(containerID string, spec *oci.Spec) error
 }
 
 func NewSecurityPolicyEnforcer(state SecurityPolicyState) (SecurityPolicyEnforcer, error) {
@@ -160,10 +167,19 @@ func (c Container) toInternal() (securityPolicyContainer, error) {
 		return securityPolicyContainer{}, err
 	}
 
+	expectedMounts, err := c.ExpectedMounts.toInternal()
+	if err != nil {
+		return securityPolicyContainer{}, err
+	}
+
 	return securityPolicyContainer{
 		Command:  command,
 		EnvRules: envRules,
 		Layers:   layers,
+		// No need to have toInternal(), because WorkingDir is a string both
+		// internally and in the policy.
+		WorkingDir:     c.WorkingDir,
+		ExpectedMounts: expectedMounts,
 	}, nil
 }
 
@@ -175,16 +191,16 @@ func (c CommandArgs) toInternal() ([]string, error) {
 	return stringMapToStringArray(c.Elements), nil
 }
 
-func (e EnvRules) toInternal() ([]securityPolicyEnvironmentVariableRule, error) {
+func (e EnvRules) toInternal() ([]EnvRuleConfig, error) {
 	envRulesMapLength := len(e.Elements)
 	if e.Length != envRulesMapLength {
 		return nil, fmt.Errorf("env rule numbers don't match in policy. expected: %d, actual: %d", e.Length, envRulesMapLength)
 	}
 
-	envRules := make([]securityPolicyEnvironmentVariableRule, envRulesMapLength)
+	envRules := make([]EnvRuleConfig, envRulesMapLength)
 	for i := 0; i < envRulesMapLength; i++ {
 		eIndex := strconv.Itoa(i)
-		rule := securityPolicyEnvironmentVariableRule{
+		rule := EnvRuleConfig{
 			Strategy: e.Elements[eIndex].Strategy,
 			Rule:     e.Elements[eIndex].Rule,
 		}
@@ -200,6 +216,14 @@ func (l Layers) toInternal() ([]string, error) {
 	}
 
 	return stringMapToStringArray(l.Elements), nil
+}
+
+func (em *ExpectedMounts) toInternal() ([]string, error) {
+	if em.Length != len(em.Elements) {
+		return nil, fmt.Errorf("expectedMounts numbers don't match in policy. expected: %d, actual: %d", em.Length, len(em.Elements))
+	}
+
+	return stringMapToStringArray(em.Elements), nil
 }
 
 func stringMapToStringArray(in map[string]string) []string {
@@ -298,7 +322,12 @@ func (pe *StandardSecurityPolicyEnforcer) EnforceOverlayMountPolicy(containerID 
 	return nil
 }
 
-func (pe *StandardSecurityPolicyEnforcer) EnforceCreateContainerPolicy(containerID string, argList []string, envList []string) (err error) {
+func (pe *StandardSecurityPolicyEnforcer) EnforceCreateContainerPolicy(
+	containerID string,
+	argList []string,
+	envList []string,
+	workingDir string,
+) (err error) {
 	pe.mutex.Lock()
 	defer pe.mutex.Unlock()
 
@@ -310,13 +339,15 @@ func (pe *StandardSecurityPolicyEnforcer) EnforceCreateContainerPolicy(container
 		return errors.New("container has already been started")
 	}
 
-	err = pe.enforceCommandPolicy(containerID, argList)
-	if err != nil {
+	if err = pe.enforceCommandPolicy(containerID, argList); err != nil {
 		return err
 	}
 
-	err = pe.enforceEnvironmentVariablePolicy(containerID, envList)
-	if err != nil {
+	if err = pe.enforceEnvironmentVariablePolicy(containerID, envList); err != nil {
+		return err
+	}
+
+	if err = pe.enforceWorkingDirPolicy(containerID, workingDir); err != nil {
 		return err
 	}
 
@@ -327,10 +358,10 @@ func (pe *StandardSecurityPolicyEnforcer) EnforceCreateContainerPolicy(container
 }
 
 func (pe *StandardSecurityPolicyEnforcer) enforceCommandPolicy(containerID string, argList []string) (err error) {
-	// Get a list of all the indexes into our security policy's list of
+	// Get a list of all the indices into our security policy's list of
 	// containers that are possible matches for this containerID based
 	// on the image overlay layout
-	possibleIndexes := possibleIndexesForID(containerID, pe.ContainerIndexToContainerIds)
+	possibleIndices := possibleIndicesForID(containerID, pe.ContainerIndexToContainerIds)
 
 	// Loop through every possible match and do two things:
 	// 1- see if any command matches. we need at least one match or
@@ -338,7 +369,7 @@ func (pe *StandardSecurityPolicyEnforcer) enforceCommandPolicy(containerID strin
 	// 2- remove this containerID as a possible match for any container from the
 	//    security policy whose command line isn't a match.
 	matchingCommandFound := false
-	for _, possibleIndex := range possibleIndexes {
+	for _, possibleIndex := range possibleIndices {
 		cmd := pe.Containers[possibleIndex].Command
 		if cmp.Equal(cmd, argList) {
 			matchingCommandFound = true
@@ -361,11 +392,11 @@ func (pe *StandardSecurityPolicyEnforcer) enforceEnvironmentVariablePolicy(conta
 	// Get a list of all the indexes into our security policy's list of
 	// containers that are possible matches for this containerID based
 	// on the image overlay layout and command line
-	possibleIndexes := possibleIndexesForID(containerID, pe.ContainerIndexToContainerIds)
+	possibleIndices := possibleIndicesForID(containerID, pe.ContainerIndexToContainerIds)
 
 	for _, envVariable := range envList {
 		matchingRuleFoundForSomeContainer := false
-		for _, possibleIndex := range possibleIndexes {
+		for _, possibleIndex := range possibleIndices {
 			envRules := pe.Containers[possibleIndex].EnvRules
 			ok := envIsMatchedByRule(envVariable, envRules)
 			if ok {
@@ -385,7 +416,25 @@ func (pe *StandardSecurityPolicyEnforcer) enforceEnvironmentVariablePolicy(conta
 	return nil
 }
 
-func envIsMatchedByRule(envVariable string, rules []securityPolicyEnvironmentVariableRule) bool {
+func (pe *StandardSecurityPolicyEnforcer) enforceWorkingDirPolicy(containerID string, workingDir string) error {
+	possibleIndices := possibleIndicesForID(containerID, pe.ContainerIndexToContainerIds)
+
+	matched := false
+	for _, pIndex := range possibleIndices {
+		pWorkingDir := pe.Containers[pIndex].WorkingDir
+		if pWorkingDir == workingDir {
+			matched = true
+		} else {
+			pe.narrowMatchesForContainerIndex(pIndex, containerID)
+		}
+	}
+	if !matched {
+		return fmt.Errorf("working_dir %s unmatched by policy rule", workingDir)
+	}
+	return nil
+}
+
+func envIsMatchedByRule(envVariable string, rules []EnvRuleConfig) bool {
 	for _, rule := range rules {
 		switch rule.Strategy {
 		case "string":
@@ -434,8 +483,8 @@ func equalForOverlay(a1 []string, a2 []string) bool {
 	return true
 }
 
-func possibleIndexesForID(containerID string, mapping map[int]map[string]struct{}) []int {
-	possibles := []int{}
+func possibleIndicesForID(containerID string, mapping map[int]map[string]struct{}) []int {
+	var possibles []int
 	for index, ids := range mapping {
 		for id := range ids {
 			if containerID == id {
@@ -445,6 +494,92 @@ func possibleIndexesForID(containerID string, mapping map[int]map[string]struct{
 	}
 
 	return possibles
+}
+
+// EnforceExpectedMountsPolicy for StandardSecurityPolicyEnforcer injects a
+// hooks.CreateRuntime hook into container spec and the hook ensures that
+// the expected mounts appear prior container start. At the moment enforcement
+// is expected to take place inside LCOW UVM.
+//
+// Expected mount is provided as a path under a sandbox mount path inside
+// container, e.g., sandbox mount is at path "/path/in/container" and wait path
+// is "/path/in/container/wait/path", which corresponds to
+// "/run/gcs/c/<podID>/sandboxMounts/path/on/the/host/wait/path"
+//
+// Iterates through container mounts to identify the correct sandbox
+// mount where the wait path is nested under. The mount spec will
+// be something like:
+// {
+//    "source": "/run/gcs/c/<podID>/sandboxMounts/path/on/host",
+//    "destination": "/path/in/container"
+// }
+// The wait path will be "/path/in/container/wait/path". To find the corresponding
+// sandbox mount do a prefix match on wait path against all container mounts
+// Destination and resolve the full path inside UVM. For example above it becomes
+// "/run/gcs/c/<podID>/sandboxMounts/path/on/host/wait/path"
+func (pe *StandardSecurityPolicyEnforcer) EnforceExpectedMountsPolicy(containerID string, spec *oci.Spec) error {
+	pe.mutex.Lock()
+	defer pe.mutex.Unlock()
+
+	if len(pe.Containers) < 1 {
+		return errors.New("policy doesn't allow mounting containers")
+	}
+
+	sandboxID := spec.Annotations[annotations.KubernetesSandboxID]
+	if sandboxID == "" {
+		return errors.New("no sandbox ID present in spec annotations")
+	}
+
+	var wMounts []string
+	pIndices := possibleIndicesForID(containerID, pe.ContainerIndexToContainerIds)
+	if len(pIndices) == 0 {
+		return errors.New("no valid container indices found")
+	}
+
+	// Unlike environment variable and command line enforcement, there isn't anything
+	// to validate here, since we're essentially just injecting hooks when necessary
+	// for all containers.
+	matchFound := false
+	for _, index := range pIndices {
+		if !matchFound {
+			matchFound = true
+			wMounts = pe.Containers[index].ExpectedMounts
+		} else {
+			pe.narrowMatchesForContainerIndex(index, containerID)
+		}
+	}
+
+	if len(wMounts) == 0 {
+		return nil
+	}
+
+	var wPaths []string
+	for _, mount := range wMounts {
+		var wp string
+		for _, m := range spec.Mounts {
+			// prefix matching to find correct sandbox mount
+			if strings.HasPrefix(mount, m.Destination) {
+				wp = filepath.Join(m.Source, strings.TrimPrefix(mount, m.Destination))
+				break
+			}
+		}
+		if wp == "" {
+			return fmt.Errorf("invalid mount path: %q", mount)
+		}
+		wPaths = append(wPaths, filepath.Clean(wp))
+	}
+
+	pathsArg := strings.Join(wPaths, ",")
+	waitPathsBinary := "/bin/wait-paths"
+	args := []string{
+		waitPathsBinary,
+		"--paths",
+		pathsArg,
+		"--timeout",
+		"60",
+	}
+	hook := hooks.NewOCIHook(waitPathsBinary, args, os.Environ())
+	return hooks.AddOCIHook(spec, hooks.CreateRuntime, hook)
 }
 
 type OpenDoorSecurityPolicyEnforcer struct{}
@@ -463,7 +598,11 @@ func (p *OpenDoorSecurityPolicyEnforcer) EnforceOverlayMountPolicy(containerID s
 	return nil
 }
 
-func (p *OpenDoorSecurityPolicyEnforcer) EnforceCreateContainerPolicy(containerID string, argList []string, envList []string) (err error) {
+func (p *OpenDoorSecurityPolicyEnforcer) EnforceCreateContainerPolicy(_ string, _ []string, _ []string, _ string) (err error) {
+	return nil
+}
+
+func (p *OpenDoorSecurityPolicyEnforcer) EnforceExpectedMountsPolicy(_ string, _ *oci.Spec) error {
 	return nil
 }
 
@@ -483,6 +622,10 @@ func (p *ClosedDoorSecurityPolicyEnforcer) EnforceOverlayMountPolicy(containerID
 	return errors.New("creating an overlay fs is denied by policy")
 }
 
-func (p *ClosedDoorSecurityPolicyEnforcer) EnforceCreateContainerPolicy(containerID string, argList []string, envList []string) (err error) {
+func (p *ClosedDoorSecurityPolicyEnforcer) EnforceCreateContainerPolicy(_ string, _ []string, _ []string, _ string) (err error) {
 	return errors.New("running commands is denied by policy")
+}
+
+func (p *ClosedDoorSecurityPolicyEnforcer) EnforceExpectedMountsPolicy(_ string, _ *oci.Spec) error {
+	return errors.New("enforcing expected mounts is denied by policy")
 }
