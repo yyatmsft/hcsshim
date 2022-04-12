@@ -1,5 +1,5 @@
-//go:build functional
-// +build functional
+//go:build windows && functional
+// +build windows,functional
 
 package cri_containerd
 
@@ -14,7 +14,7 @@ import (
 )
 
 func Test_LCOW_Layer_Integrity(t *testing.T) {
-	requireFeatures(t, featureLCOWIntegrity, featureLCOW)
+	requireFeatures(t, featureLCOW, featureLCOWIntegrity)
 
 	client := newTestRuntimeClient(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -85,7 +85,7 @@ func Test_LCOW_Layer_Integrity(t *testing.T) {
 
 			// Validate that verity target(s) present
 			output := shimDiagExecOutput(ctx, t, podID, []string{"ls", "-l", "/dev/mapper"})
-			filtered := filterStrings(strings.Split(output, "\n"), fmt.Sprintf("dm-verity-%s", scenario.layerType))
+			filtered := filterStrings(strings.Split(output, "\n"), fmt.Sprintf("verity-%s", scenario.layerType))
 			if len(filtered) == 0 {
 				t.Fatalf("expected verity targets for %s devices, none found.\n%s\n", scenario.layerType, output)
 			}

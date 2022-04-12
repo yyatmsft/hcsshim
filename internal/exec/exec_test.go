@@ -1,3 +1,5 @@
+//go:build windows
+
 package exec
 
 import (
@@ -176,7 +178,7 @@ func TestExecsWithJob(t *testing.T) {
 	}
 
 	if len(pids) != 2 {
-		t.Fatalf("should be two pids in job object, got: %d", len(pids))
+		t.Fatalf("should be two pids in job object, got: %d. Pids: %+v", len(pids), pids)
 	}
 
 	for _, pid := range pids {
