@@ -91,7 +91,10 @@ func (h *Host) SetSecurityPolicy(base64Policy string) error {
 		return err
 	}
 
-	p, err := securitypolicy.NewSecurityPolicyEnforcer(*securityPolicyState)
+	p, err := securitypolicy.NewSecurityPolicyEnforcer(
+		*securityPolicyState,
+		securitypolicy.WithPrivilegedMounts(policy.DefaultCRIPrivilegedMounts()),
+	)
 	if err != nil {
 		return err
 	}
@@ -115,9 +118,28 @@ func (h *Host) SetSecurityPolicy(base64Policy string) error {
 	return nil
 }
 
+func (h *Host) SecurityPolicyEnforcer() securitypolicy.SecurityPolicyEnforcer {
+	return h.securityPolicyEnforcer
+}
+
+func (h *Host) Transport() transport.Transport {
+	return h.vsock
+}
+
 func (h *Host) RemoveContainer(id string) {
 	h.containersMutex.Lock()
 	defer h.containersMutex.Unlock()
+
+	c, ok := h.containers[id]
+	if !ok {
+		return
+	}
+
+	// delete the network namespace for standalone and sandbox containers
+	criType, isCRI := c.spec.Annotations[annotations.KubernetesContainerType]
+	if !isCRI || criType == "sandbox" {
+		RemoveNetworkNamespace(context.Background(), id)
+	}
 
 	delete(h.containers, id)
 }
@@ -174,13 +196,14 @@ func setupSandboxHugePageMountsPath(id string) error {
 func (h *Host) CreateContainer(ctx context.Context, id string, settings *prot.VMHostedContainerSettingsV2) (_ *Container, err error) {
 	criType, isCRI := settings.OCISpecification.Annotations[annotations.KubernetesContainerType]
 	c := &Container{
-		id:        id,
-		vsock:     h.vsock,
-		spec:      settings.OCISpecification,
-		isSandbox: criType == "sandbox",
-		exitType:  prot.NtUnexpectedExit,
-		processes: make(map[uint32]*containerProcess),
-		status:    containerCreating,
+		id:             id,
+		vsock:          h.vsock,
+		spec:           settings.OCISpecification,
+		isSandbox:      criType == "sandbox",
+		exitType:       prot.NtUnexpectedExit,
+		processes:      make(map[uint32]*containerProcess),
+		status:         containerCreating,
+		scratchDirPath: settings.ScratchDirPath,
 	}
 
 	if err := h.AddContainer(id, c); err != nil {
@@ -280,7 +303,7 @@ func (h *Host) CreateContainer(ctx context.Context, id string, settings *prot.VM
 	}
 
 	// Sandbox mount paths need to be resolved in the spec before expected mounts policy can be enforced.
-	if err = h.securityPolicyEnforcer.EnforceExpectedMountsPolicy(id, settings.OCISpecification); err != nil {
+	if err = h.securityPolicyEnforcer.EnforceWaitMountPointsPolicy(id, settings.OCISpecification); err != nil {
 		return nil, errors.Wrapf(err, "container creation denied due to policy")
 	}
 
@@ -580,7 +603,7 @@ func modifyCombinedLayers(ctx context.Context, rt guestrequest.RequestType, cl *
 func modifyNetwork(ctx context.Context, rt guestrequest.RequestType, na *guestresource.LCOWNetworkAdapter) (err error) {
 	switch rt {
 	case guestrequest.RequestTypeAdd:
-		ns := getOrAddNetworkNamespace(na.NamespaceID)
+		ns := GetOrAddNetworkNamespace(na.NamespaceID)
 		if err := ns.AddAdapter(ctx, na); err != nil {
 			return err
 		}
@@ -588,7 +611,7 @@ func modifyNetwork(ctx context.Context, rt guestrequest.RequestType, na *guestre
 		// container or not so it must always call `Sync`.
 		return ns.Sync(ctx)
 	case guestrequest.RequestTypeRemove:
-		ns := getOrAddNetworkNamespace(na.ID)
+		ns := GetOrAddNetworkNamespace(na.ID)
 		if err := ns.RemoveAdapter(ctx, na.ID); err != nil {
 			return err
 		}

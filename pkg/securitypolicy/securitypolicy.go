@@ -42,13 +42,14 @@ type EnvRuleConfig struct {
 // ContainerConfig contains toml or JSON config for container described
 // in security policy.
 type ContainerConfig struct {
-	ImageName      string          `json:"image_name" toml:"image_name"`
-	Command        []string        `json:"command" toml:"command"`
-	Auth           AuthConfig      `json:"auth" toml:"auth"`
-	EnvRules       []EnvRuleConfig `json:"env_rules" toml:"env_rule"`
-	WorkingDir     string          `json:"working_dir" toml:"working_dir"`
-	ExpectedMounts []string        `json:"expected_mounts" toml:"expected_mounts"`
-	Mounts         []MountConfig   `json:"mounts" toml:"mount"`
+	ImageName       string          `json:"image_name" toml:"image_name"`
+	Command         []string        `json:"command" toml:"command"`
+	Auth            AuthConfig      `json:"auth" toml:"auth"`
+	EnvRules        []EnvRuleConfig `json:"env_rules" toml:"env_rule"`
+	WorkingDir      string          `json:"working_dir" toml:"working_dir"`
+	WaitMountPoints []string        `json:"wait_mount_points" toml:"wait_mount_points"`
+	Mounts          []MountConfig   `json:"mounts" toml:"mount"`
+	AllowElevated   bool            `json:"allow_elevated" toml:"allow_elevated"`
 }
 
 // MountConfig contains toml or JSON config for mount security policy
@@ -57,27 +58,6 @@ type MountConfig struct {
 	HostPath      string `json:"host_path" toml:"host_path"`
 	ContainerPath string `json:"container_path" toml:"container_path"`
 	Readonly      bool   `json:"readonly" toml:"readonly"`
-}
-
-// NewContainerConfig creates a new ContainerConfig from the given values.
-func NewContainerConfig(
-	imageName string,
-	command []string,
-	envRules []EnvRuleConfig,
-	auth AuthConfig,
-	workingDir string,
-	expectedMounts []string,
-	mounts []MountConfig,
-) ContainerConfig {
-	return ContainerConfig{
-		ImageName:      imageName,
-		Command:        command,
-		EnvRules:       envRules,
-		Auth:           auth,
-		WorkingDir:     workingDir,
-		ExpectedMounts: expectedMounts,
-		Mounts:         mounts,
-	}
 }
 
 // NewEnvVarRules creates slice of EnvRuleConfig's from environment variables
@@ -190,12 +170,13 @@ type Containers struct {
 }
 
 type Container struct {
-	Command        CommandArgs    `json:"command"`
-	EnvRules       EnvRules       `json:"env_rules"`
-	Layers         Layers         `json:"layers"`
-	WorkingDir     string         `json:"working_dir"`
-	ExpectedMounts ExpectedMounts `json:"expected_mounts"`
-	Mounts         Mounts         `json:"mounts"`
+	Command         CommandArgs     `json:"command"`
+	EnvRules        EnvRules        `json:"env_rules"`
+	Layers          Layers          `json:"layers"`
+	WorkingDir      string          `json:"working_dir"`
+	WaitMountPoints WaitMountPoints `json:"wait_mount_points"`
+	Mounts          Mounts          `json:"mounts"`
+	AllowElevated   bool            `json:"allow_elevated"`
 }
 
 // StringArrayMap wraps an array of strings as a string map.
@@ -208,7 +189,7 @@ type Layers StringArrayMap
 
 type CommandArgs StringArrayMap
 
-type ExpectedMounts StringArrayMap
+type WaitMountPoints StringArrayMap
 
 type Options StringArrayMap
 
@@ -237,6 +218,7 @@ func CreateContainerPolicy(
 	workingDir string,
 	eMounts []string,
 	mounts []MountConfig,
+	allowElevated bool,
 ) (*Container, error) {
 	if err := validateEnvRules(envRules); err != nil {
 		return nil, err
@@ -245,12 +227,13 @@ func CreateContainerPolicy(
 		return nil, err
 	}
 	return &Container{
-		Command:        newCommandArgs(command),
-		Layers:         newLayers(layers),
-		EnvRules:       newEnvRules(envRules),
-		WorkingDir:     workingDir,
-		ExpectedMounts: newExpectedMounts(eMounts),
-		Mounts:         newMountConstraints(mounts),
+		Command:         newCommandArgs(command),
+		Layers:          newLayers(layers),
+		EnvRules:        newEnvRules(envRules),
+		WorkingDir:      workingDir,
+		WaitMountPoints: newWaitMountPoints(eMounts),
+		Mounts:          newMountConstraints(mounts),
+		AllowElevated:   allowElevated,
 	}, nil
 }
 
@@ -319,12 +302,12 @@ func newLayers(ls []string) Layers {
 	}
 }
 
-func newExpectedMounts(em []string) ExpectedMounts {
+func newWaitMountPoints(em []string) WaitMountPoints {
 	mounts := map[string]string{}
 	for i, m := range em {
 		mounts[strconv.Itoa(i)] = m
 	}
-	return ExpectedMounts{
+	return WaitMountPoints{
 		Elements: mounts,
 	}
 }
@@ -445,8 +428,8 @@ func (o Options) MarshalJSON() ([]byte, error) {
 	return json.Marshal(StringArrayMap(o))
 }
 
-func (em ExpectedMounts) MarshalJSON() ([]byte, error) {
-	return json.Marshal(StringArrayMap(em))
+func (wm WaitMountPoints) MarshalJSON() ([]byte, error) {
+	return json.Marshal(StringArrayMap(wm))
 }
 
 func (m Mounts) MarshalJSON() ([]byte, error) {

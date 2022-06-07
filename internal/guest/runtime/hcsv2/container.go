@@ -5,6 +5,8 @@ package hcsv2
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -25,6 +27,7 @@ import (
 	"github.com/Microsoft/hcsshim/internal/guest/transport"
 	"github.com/Microsoft/hcsshim/internal/log"
 	"github.com/Microsoft/hcsshim/internal/logfields"
+	"github.com/Microsoft/hcsshim/internal/oc"
 	"github.com/Microsoft/hcsshim/internal/protocol/guestrequest"
 	"github.com/Microsoft/hcsshim/internal/protocol/guestresource"
 )
@@ -59,6 +62,11 @@ type Container struct {
 
 	// Only access atomically through getStatus/setStatus.
 	status containerStatus
+
+	// scratchDirPath represents the path inside the UVM where the scratch directory
+	// of this container is located. Usually, this is either `/run/gcs/c/<containerID>` or
+	// `/run/gcs/c/<UVMID>/container_<containerID>` if scratch is shared with UVM scratch.
+	scratchDirPath string
 }
 
 func (c *Container) Start(ctx context.Context, conSettings stdio.ConnectionSettings) (int, error) {
@@ -123,6 +131,11 @@ func (c *Container) ExecProcess(ctx context.Context, process *oci.Process, conSe
 	return pid, nil
 }
 
+// InitProcess returns the container's init process
+func (c *Container) InitProcess() Process {
+	return c.initProcess
+}
+
 // GetProcess returns the Process with the matching 'pid'. If the 'pid' does
 // not exit returns error.
 func (c *Container) GetProcess(pid uint32) (Process, error) {
@@ -130,7 +143,7 @@ func (c *Container) GetProcess(pid uint32) (Process, error) {
 	logrus.WithFields(logrus.Fields{
 		logfields.ContainerID: c.id,
 		logfields.ProcessID:   pid,
-	}).Info("opengcs::Container::GetProcesss")
+	}).Info("opengcs::Container::GetProcess")
 	if c.initProcess.pid == pid {
 		return c.initProcess, nil
 	}
@@ -185,7 +198,20 @@ func (c *Container) Delete(ctx context.Context) error {
 		}
 	}
 
-	return c.container.Delete()
+	var retErr error
+	if err := c.container.Delete(); err != nil {
+		retErr = err
+	}
+
+	if err := os.RemoveAll(c.scratchDirPath); err != nil {
+		if retErr != nil {
+			retErr = fmt.Errorf("errors deleting container state, %s & %s", retErr, err)
+		} else {
+			retErr = err
+		}
+	}
+
+	return retErr
 }
 
 func (c *Container) Update(ctx context.Context, resources interface{}) error {
@@ -195,7 +221,7 @@ func (c *Container) Update(ctx context.Context, resources interface{}) error {
 
 // Wait waits for the container's init process to exit.
 func (c *Container) Wait() prot.NotificationType {
-	_, span := trace.StartSpan(context.Background(), "opengcs::Container::Wait")
+	_, span := oc.StartSpan(context.Background(), "opengcs::Container::Wait")
 	defer span.End()
 	span.AddAttributes(trace.StringAttribute(logfields.ContainerID, c.id))
 
@@ -220,7 +246,7 @@ func (c *Container) setExitType(signal syscall.Signal) {
 
 // GetStats returns the cgroup metrics for the container.
 func (c *Container) GetStats(ctx context.Context) (*v1.Metrics, error) {
-	_, span := trace.StartSpan(ctx, "opengcs::Container::GetStats")
+	_, span := oc.StartSpan(ctx, "opengcs::Container::GetStats")
 	defer span.End()
 	span.AddAttributes(trace.StringAttribute("cid", c.id))
 
@@ -244,4 +270,8 @@ func (c *Container) getStatus() containerStatus {
 
 func (c *Container) setStatus(st containerStatus) {
 	atomic.StoreUint32((*uint32)(&c.status), uint32(st))
+}
+
+func (c *Container) ID() string {
+	return c.id
 }
