@@ -13,11 +13,12 @@ import (
 	"strings"
 	"sync"
 
+	oci "github.com/opencontainers/runtime-spec/specs-go"
+
 	specInternal "github.com/Microsoft/hcsshim/internal/guest/spec"
 	"github.com/Microsoft/hcsshim/internal/guestpath"
 	"github.com/Microsoft/hcsshim/internal/hooks"
 	"github.com/Microsoft/hcsshim/pkg/annotations"
-	oci "github.com/opencontainers/runtime-spec/specs-go"
 )
 
 type SecurityPolicyEnforcer interface {
@@ -25,12 +26,12 @@ type SecurityPolicyEnforcer interface {
 	EnforceDeviceUnmountPolicy(unmountTarget string) (err error)
 	EnforceOverlayMountPolicy(containerID string, layerPaths []string) (err error)
 	EnforceCreateContainerPolicy(containerID string, argList []string, envList []string, workingDir string) (err error)
-	EnforceExpectedMountsPolicy(containerID string, spec *oci.Spec) error
+	EnforceWaitMountPointsPolicy(containerID string, spec *oci.Spec) error
 	EnforceMountPolicy(sandboxID, containerID string, spec *oci.Spec) error
 	ExtendDefaultMounts([]oci.Mount) error
 }
 
-func NewSecurityPolicyEnforcer(state SecurityPolicyState) (SecurityPolicyEnforcer, error) {
+func NewSecurityPolicyEnforcer(state SecurityPolicyState, eOpts ...standardEnforcerOpt) (SecurityPolicyEnforcer, error) {
 	if state.SecurityPolicy.AllowAll {
 		return &OpenDoorSecurityPolicyEnforcer{}, nil
 	} else {
@@ -38,7 +39,13 @@ func NewSecurityPolicyEnforcer(state SecurityPolicyState) (SecurityPolicyEnforce
 		if err != nil {
 			return nil, err
 		}
-		return NewStandardSecurityPolicyEnforcer(containers, state.EncodedSecurityPolicy.SecurityPolicy), nil
+		enforcer := NewStandardSecurityPolicyEnforcer(containers, state.EncodedSecurityPolicy.SecurityPolicy)
+		for _, o := range eOpts {
+			if err := o(enforcer); err != nil {
+				return nil, err
+			}
+		}
+		return enforcer, nil
 	}
 }
 
@@ -60,6 +67,30 @@ func newMountConstraint(src, dst string, mType string, mOpts []string) mountInte
 	}
 }
 
+type standardEnforcerOpt func(e *StandardSecurityPolicyEnforcer) error
+
+// WithPrivilegedMounts converts the input mounts to internal mount constraints
+// and extends existing internal mount constraints if the container is allowed
+// to be executed in elevated mode.
+func WithPrivilegedMounts(mounts []oci.Mount) standardEnforcerOpt {
+	return func(e *StandardSecurityPolicyEnforcer) error {
+		for _, c := range e.Containers {
+			if c.allowElevated {
+				for _, m := range mounts {
+					mi := mountInternal{
+						Source:      m.Source,
+						Destination: m.Destination,
+						Type:        m.Type,
+						Options:     m.Options,
+					}
+					c.Mounts = append(c.Mounts, mi)
+				}
+			}
+		}
+		return nil
+	}
+}
+
 // Internal version of Container
 type securityPolicyContainer struct {
 	// The command that we will allow the container to execute
@@ -76,16 +107,17 @@ type securityPolicyContainer struct {
 	WorkingDir string
 	// Unordered list of mounts which are expected to be present when the container
 	// starts
-	ExpectedMounts []string `json:"expected_mounts"`
+	WaitMountPoints []string
 	// A list of constraints for determining if a given mount is allowed.
-	Mounts []mountInternal
+	Mounts        []mountInternal
+	allowElevated bool
 }
 
 type StandardSecurityPolicyEnforcer struct {
 	// EncodedSecurityPolicy state is needed for key release
 	EncodedSecurityPolicy string
 	// Containers from the user supplied security policy.
-	Containers []securityPolicyContainer
+	Containers []*securityPolicyContainer
 	// Devices and ContainerIndexToContainerIds are used to build up an
 	// understanding of the containers running with a UVM as they come up and
 	// map them back to a container definition from the user supplied
@@ -158,7 +190,10 @@ type StandardSecurityPolicyEnforcer struct {
 
 var _ SecurityPolicyEnforcer = (*StandardSecurityPolicyEnforcer)(nil)
 
-func NewStandardSecurityPolicyEnforcer(containers []securityPolicyContainer, encoded string) *StandardSecurityPolicyEnforcer {
+func NewStandardSecurityPolicyEnforcer(
+	containers []*securityPolicyContainer,
+	encoded string,
+) *StandardSecurityPolicyEnforcer {
 	// create new StandardSecurityPolicyEnforcer and add the expected containers
 	// to it
 	// fill out corresponding devices structure by creating a "same shaped"
@@ -180,7 +215,7 @@ func NewStandardSecurityPolicyEnforcer(containers []securityPolicyContainer, enc
 	}
 }
 
-func (c Containers) toInternal() ([]securityPolicyContainer, error) {
+func (c Containers) toInternal() ([]*securityPolicyContainer, error) {
 	containerMapLength := len(c.Elements)
 	if c.Length != containerMapLength {
 		err := fmt.Errorf(
@@ -191,7 +226,7 @@ func (c Containers) toInternal() ([]securityPolicyContainer, error) {
 		return nil, err
 	}
 
-	internal := make([]securityPolicyContainer, containerMapLength)
+	internal := make([]*securityPolicyContainer, containerMapLength)
 
 	for i := 0; i < containerMapLength; i++ {
 		index := strconv.Itoa(i)
@@ -204,7 +239,7 @@ func (c Containers) toInternal() ([]securityPolicyContainer, error) {
 			return nil, err
 		}
 		// save off new container
-		internal[i] = cInternal
+		internal[i] = &cInternal
 	}
 
 	return internal, nil
@@ -226,7 +261,7 @@ func (c Container) toInternal() (securityPolicyContainer, error) {
 		return securityPolicyContainer{}, err
 	}
 
-	expectedMounts, err := c.ExpectedMounts.toInternal()
+	waitMounts, err := c.WaitMountPoints.toInternal()
 	if err != nil {
 		return securityPolicyContainer{}, err
 	}
@@ -241,9 +276,10 @@ func (c Container) toInternal() (securityPolicyContainer, error) {
 		Layers:   layers,
 		// No need to have toInternal(), because WorkingDir is a string both
 		// internally and in the policy.
-		WorkingDir:     c.WorkingDir,
-		ExpectedMounts: expectedMounts,
-		Mounts:         mounts,
+		WorkingDir:      c.WorkingDir,
+		WaitMountPoints: waitMounts,
+		Mounts:          mounts,
+		allowElevated:   c.AllowElevated,
 	}, nil
 }
 
@@ -286,12 +322,12 @@ func (l Layers) toInternal() ([]string, error) {
 	return stringMapToStringArray(l.Elements)
 }
 
-func (em ExpectedMounts) toInternal() ([]string, error) {
-	if em.Length != len(em.Elements) {
-		return nil, fmt.Errorf("expectedMounts numbers don't match in policy. expected: %d, actual: %d", em.Length, len(em.Elements))
+func (wm WaitMountPoints) toInternal() ([]string, error) {
+	if wm.Length != len(wm.Elements) {
+		return nil, fmt.Errorf("expectedMounts numbers don't match in policy. expected: %d, actual: %d", wm.Length, len(wm.Elements))
 	}
 
-	return stringMapToStringArray(em.Elements)
+	return stringMapToStringArray(wm.Elements)
 }
 
 func (o Options) toInternal() ([]string, error) {
@@ -616,6 +652,9 @@ func (pe *StandardSecurityPolicyEnforcer) enforceDefaultMounts(specMount oci.Mou
 }
 
 func (pe *StandardSecurityPolicyEnforcer) ExtendDefaultMounts(defaultMounts []oci.Mount) error {
+	pe.mutex.Lock()
+	defer pe.mutex.Unlock()
+
 	for _, mnt := range defaultMounts {
 		pe.DefaultMounts = append(pe.DefaultMounts, newMountConstraint(
 			mnt.Source,
@@ -724,7 +763,7 @@ func stringSlicesEqual(slice1, slice2 []string) bool {
 	return true
 }
 
-// EnforceExpectedMountsPolicy for StandardSecurityPolicyEnforcer injects a
+// EnforceWaitMountPointsPolicy for StandardSecurityPolicyEnforcer injects a
 // hooks.CreateRuntime hook into container spec and the hook ensures that
 // the expected mounts appear prior container start. At the moment enforcement
 // is expected to take place inside LCOW UVM.
@@ -745,7 +784,7 @@ func stringSlicesEqual(slice1, slice2 []string) bool {
 // sandbox mount do a prefix match on wait path against all container mounts
 // Destination and resolve the full path inside UVM. For example above it becomes
 // "/run/gcs/c/<podID>/sandboxMounts/path/on/host/wait/path"
-func (pe *StandardSecurityPolicyEnforcer) EnforceExpectedMountsPolicy(containerID string, spec *oci.Spec) error {
+func (pe *StandardSecurityPolicyEnforcer) EnforceWaitMountPointsPolicy(containerID string, spec *oci.Spec) error {
 	pe.mutex.Lock()
 	defer pe.mutex.Unlock()
 
@@ -771,7 +810,7 @@ func (pe *StandardSecurityPolicyEnforcer) EnforceExpectedMountsPolicy(containerI
 	for _, index := range pIndices {
 		if !matchFound {
 			matchFound = true
-			wMounts = pe.Containers[index].ExpectedMounts
+			wMounts = pe.Containers[index].WaitMountPoints
 		} else {
 			pe.narrowMatchesForContainerIndex(index, containerID)
 		}
@@ -834,7 +873,7 @@ func (OpenDoorSecurityPolicyEnforcer) EnforceMountPolicy(_, _ string, _ *oci.Spe
 	return nil
 }
 
-func (OpenDoorSecurityPolicyEnforcer) EnforceExpectedMountsPolicy(_ string, _ *oci.Spec) error {
+func (OpenDoorSecurityPolicyEnforcer) EnforceWaitMountPointsPolicy(_ string, _ *oci.Spec) error {
 	return nil
 }
 
@@ -862,8 +901,8 @@ func (ClosedDoorSecurityPolicyEnforcer) EnforceCreateContainerPolicy(_ string, _
 	return errors.New("running commands is denied by policy")
 }
 
-func (ClosedDoorSecurityPolicyEnforcer) EnforceExpectedMountsPolicy(_ string, _ *oci.Spec) error {
-	return errors.New("enforcing expected mounts is denied by policy")
+func (ClosedDoorSecurityPolicyEnforcer) EnforceWaitMountPointsPolicy(_ string, _ *oci.Spec) error {
+	return errors.New("enforcing wait mount points is denied by policy")
 }
 
 func (ClosedDoorSecurityPolicyEnforcer) EnforceMountPolicy(_, _ string, _ *oci.Spec) error {

@@ -32,6 +32,7 @@ import (
 	"github.com/Microsoft/hcsshim/internal/jobcontainers"
 	"github.com/Microsoft/hcsshim/internal/log"
 	"github.com/Microsoft/hcsshim/internal/memory"
+	"github.com/Microsoft/hcsshim/internal/oc"
 	"github.com/Microsoft/hcsshim/internal/oci"
 	"github.com/Microsoft/hcsshim/internal/processorinfo"
 	"github.com/Microsoft/hcsshim/internal/protocol/guestrequest"
@@ -624,6 +625,13 @@ func (ht *hcsTask) DeleteExec(ctx context.Context, eid string) (int, uint32, tim
 			// https://pkg.go.dev/sync#Map.Range
 			return true
 		})
+
+		// cleanup the container directories inside the UVM if required.
+		if ht.host != nil {
+			if err := ht.host.DeleteContainerState(ctx, ht.id); err != nil {
+				log.G(ctx).WithError(err).Errorf("failed to delete container state")
+			}
+		}
 	}
 
 	status := e.Status()
@@ -692,7 +700,7 @@ func (ht *hcsTask) Wait() *task.StateResponse {
 }
 
 func (ht *hcsTask) waitInitExit(destroyContainer bool) {
-	ctx, span := trace.StartSpan(context.Background(), "hcsTask::waitInitExit")
+	ctx, span := oc.StartSpan(context.Background(), "hcsTask::waitInitExit")
 	defer span.End()
 	span.AddAttributes(trace.StringAttribute("tid", ht.id))
 
@@ -723,7 +731,7 @@ func (ht *hcsTask) waitInitExit(destroyContainer bool) {
 // Note: For Windows process isolated containers there is no host virtual
 // machine so this should not be called.
 func (ht *hcsTask) waitForHostExit() {
-	ctx, span := trace.StartSpan(context.Background(), "hcsTask::waitForHostExit")
+	ctx, span := oc.StartSpan(context.Background(), "hcsTask::waitForHostExit")
 	defer span.End()
 	span.AddAttributes(trace.StringAttribute("tid", ht.id))
 

@@ -10,10 +10,10 @@ func WithEnvVarRules(envs []EnvRuleConfig) ContainerConfigOpt {
 	}
 }
 
-// WithExpectedMounts adds expected mounts to container policy config.
-func WithExpectedMounts(em []string) ContainerConfigOpt {
+// WithWaitMountPoints adds expected mounts to container policy config.
+func WithWaitMountPoints(em []string) ContainerConfigOpt {
 	return func(c *ContainerConfig) error {
-		c.ExpectedMounts = append(c.ExpectedMounts, em...)
+		c.WaitMountPoints = append(c.WaitMountPoints, em...)
 		return nil
 	}
 }
@@ -31,6 +31,14 @@ func WithWorkingDir(wd string) ContainerConfigOpt {
 func WithMountConstraints(mc []MountConfig) ContainerConfigOpt {
 	return func(c *ContainerConfig) error {
 		c.Mounts = append(c.Mounts, mc...)
+		return nil
+	}
+}
+
+// WithAllowElevated allows container to run in an elevated/privileged mode.
+func WithAllowElevated(elevated bool) ContainerConfigOpt {
+	return func(c *ContainerConfig) error {
+		c.AllowElevated = elevated
 		return nil
 	}
 }
