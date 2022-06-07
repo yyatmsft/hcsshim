@@ -46,6 +46,15 @@ stages:
               go build -o $OUT_DIR github.com/Microsoft/hcsshim/internal/tools/grantvmgroupaccess
 
               GOOS=linux go build -buildmode=pie -o $OUT_DIR github.com/Microsoft/hcsshim/cmd/tar2ext4
+            env:
+              GOPROXY: off
+              GOFLAGS: -mod=vendor
+              GOOS: windows
+              OUT_DIR: '$(Build.StagingDirectory)/out'
+            displayName: build hcsshim binaries
+
+          - script: |
+              set -eoux
 
               cd test
               go test -c github.com/Microsoft/hcsshim/test/cri-containerd --tags functional
@@ -54,11 +63,10 @@ stages:
               mv ./sample-logging-driver.exe $OUT_DIR
               cd ..
             env:
-              GOPROXY: off
-              GOFLAGS: -mod=vendor
               GOOS: windows
               OUT_DIR: '$(Build.StagingDirectory)/out'
-            displayName: build hcsshim binaries
+              GOFLAGS: -mod=mod
+            displayName: build test binaries
 
           - script: |
               set -eoux
