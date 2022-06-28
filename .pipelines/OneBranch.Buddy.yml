@@ -5,6 +5,8 @@ variables:
   WindowsContainerImage: cdpxwin1809.azurecr.io/global/vse2019:latest
   LinuxContainerImage: cdpxa0712bf275644e58a9d28a8053e650ba00.azurecr.io/official/containerplatform/linux/golang:ms-1.17.9
   ONEBRANCH_AME_ACR_LOGIN: cdpxa0712bf275644e58a9d28a8053e650ba00.azurecr.io
+  # This needs to be removed when if we ever start building container images from this repository
+  DisableDockerDetector: true
 
 resources:
   repositories:
