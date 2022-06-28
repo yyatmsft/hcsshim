@@ -45,7 +45,7 @@ var (
 	modadvapi32   = windows.NewLazySystemDLL("advapi32.dll")
 	modcfgmgr32   = windows.NewLazySystemDLL("cfgmgr32.dll")
 
-	procBfSetupFilterEx                        = modbindfltapi.NewProc("BfSetupFilterEx")
+	procBfSetupFilter                          = modbindfltapi.NewProc("BfSetupFilter")
 	procNetLocalGroupGetInfo                   = modnetapi32.NewProc("NetLocalGroupGetInfo")
 	procNetUserAdd                             = modnetapi32.NewProc("NetUserAdd")
 	procNetUserDel                             = modnetapi32.NewProc("NetUserDel")
@@ -80,11 +80,11 @@ var (
 	procRtlNtStatusToDosError                  = modntdll.NewProc("RtlNtStatusToDosError")
 )
 
-func BfSetupFilterEx(flags uint32, jobHandle windows.Handle, sid *windows.SID, virtRootPath *uint16, virtTargetPath *uint16, virtExceptions **uint16, virtExceptionPathCount uint32) (hr error) {
-	if hr = procBfSetupFilterEx.Find(); hr != nil {
+func BfSetupFilter(jobHandle windows.Handle, flags uint32, virtRootPath *uint16, virtTargetPath *uint16, virtExceptions **uint16, virtExceptionPathCount uint32) (hr error) {
+	if hr = procBfSetupFilter.Find(); hr != nil {
 		return
 	}
-	r0, _, _ := syscall.Syscall9(procBfSetupFilterEx.Addr(), 7, uintptr(flags), uintptr(jobHandle), uintptr(unsafe.Pointer(sid)), uintptr(unsafe.Pointer(virtRootPath)), uintptr(unsafe.Pointer(virtTargetPath)), uintptr(unsafe.Pointer(virtExceptions)), uintptr(virtExceptionPathCount), 0, 0)
+	r0, _, _ := syscall.Syscall6(procBfSetupFilter.Addr(), 6, uintptr(jobHandle), uintptr(flags), uintptr(unsafe.Pointer(virtRootPath)), uintptr(unsafe.Pointer(virtTargetPath)), uintptr(unsafe.Pointer(virtExceptions)), uintptr(virtExceptionPathCount))
 	if int32(r0) < 0 {
 		if r0&0x1fff0000 == 0x00070000 {
 			r0 &= 0xffff
@@ -153,7 +153,7 @@ func resizePseudoConsole(hPc windows.Handle, size uint32) (hr error) {
 	return
 }
 
-func NtQuerySystemInformation(systemInfoClass int, systemInformation uintptr, systemInfoLength uint32, returnLength *uint32) (status uint32) {
+func NtQuerySystemInformation(systemInfoClass int, systemInformation unsafe.Pointer, systemInfoLength uint32, returnLength *uint32) (status uint32) {
 	r0, _, _ := syscall.Syscall6(procNtQuerySystemInformation.Addr(), 4, uintptr(systemInfoClass), uintptr(systemInformation), uintptr(systemInfoLength), uintptr(unsafe.Pointer(returnLength)), 0, 0)
 	status = uint32(r0)
 	return
@@ -205,7 +205,7 @@ func IsProcessInJob(procHandle windows.Handle, jobHandle windows.Handle, result 
 	return
 }
 
-func QueryInformationJobObject(jobHandle windows.Handle, infoClass uint32, jobObjectInfo uintptr, jobObjectInformationLength uint32, lpReturnLength *uint32) (err error) {
+func QueryInformationJobObject(jobHandle windows.Handle, infoClass uint32, jobObjectInfo unsafe.Pointer, jobObjectInformationLength uint32, lpReturnLength *uint32) (err error) {
 	r1, _, e1 := syscall.Syscall6(procQueryInformationJobObject.Addr(), 5, uintptr(jobHandle), uintptr(infoClass), uintptr(jobObjectInfo), uintptr(jobObjectInformationLength), uintptr(unsafe.Pointer(lpReturnLength)), 0)
 	if r1 == 0 {
 		if e1 != 0 {
@@ -297,7 +297,7 @@ func LocalFree(ptr uintptr) {
 	return
 }
 
-func NtQueryInformationProcess(processHandle windows.Handle, processInfoClass uint32, processInfo uintptr, processInfoLength uint32, returnLength *uint32) (status uint32) {
+func NtQueryInformationProcess(processHandle windows.Handle, processInfoClass uint32, processInfo unsafe.Pointer, processInfoLength uint32, returnLength *uint32) (status uint32) {
 	r0, _, _ := syscall.Syscall6(procNtQueryInformationProcess.Addr(), 5, uintptr(processHandle), uintptr(processInfoClass), uintptr(processInfo), uintptr(processInfoLength), uintptr(unsafe.Pointer(returnLength)), 0)
 	status = uint32(r0)
 	return
