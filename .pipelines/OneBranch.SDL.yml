@@ -12,6 +12,8 @@ schedules:
 variables:
   WindowsContainerImage: cdpxwin1809.azurecr.io/global/vse2019:latest
   LGTM.UploadSnapshot: true
+  # This needs to be removed when if we ever start building container images from this repository
+  DisableDockerDetector: true
 
 resources:
   repositories:
