@@ -6,7 +6,7 @@ schedules:
     displayName: Weekly SDL Compliance
     branches:
       include:
-        - master
+        - main
     always: true
 
 variables:
@@ -24,7 +24,7 @@ resources:
     - repository: cplat
       type: git
       name: ContainerPlatform/ContainerPlatform
-      ref: refs/heads/master
+      ref: refs/heads/main
 
 
 extends:

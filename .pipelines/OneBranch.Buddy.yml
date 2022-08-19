@@ -1,5 +1,5 @@
 trigger:
-  - master
+  - main
 
 variables:
   WindowsContainerImage: cdpxwin1809.azurecr.io/global/vse2019:latest
@@ -17,7 +17,7 @@ resources:
     - repository: cplat
       type: git
       name: ContainerPlatform/ContainerPlatform
-      ref: refs/heads/master
+      ref: refs/heads/main
 
 extends:
   template: v2/OneBranch.NonOfficial.CrossPlat.yml@ob-templates
