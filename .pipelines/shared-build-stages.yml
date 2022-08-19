@@ -28,7 +28,7 @@ stages:
                 # Pull upstream changes
                 git remote add upstream https://github.com/microsoft/hcsshim.git
                 git fetch upstream
-                git merge upstream/master
+                git merge upstream/main
 
                 # OneBranch custom versioning for nightly builds
                 gitVersion=$(git rev-parse upstream/master)
