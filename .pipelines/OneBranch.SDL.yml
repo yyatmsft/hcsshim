@@ -14,6 +14,7 @@ variables:
   LGTM.UploadSnapshot: true
   # This needs to be removed when if we ever start building container images from this repository
   DisableDockerDetector: true
+  DisableGoCliScan: true
 
 resources:
   repositories:
