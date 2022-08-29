@@ -68,16 +68,18 @@ stages:
           - script: |
               set -eoux
 
-              cd test
-              go test -c github.com/Microsoft/hcsshim/test/cri-containerd --tags functional
+              go test -gcflags=all=-d=checkptr -c github.com/Microsoft/hcsshim/test/cri-containerd --tags functional
+              go test -gcflags=all=-d=checkptr -tags=functional -c github.com/Microsoft/hcsshim/test/functional
               go build -o sample-logging-driver.exe cri-containerd/helpers/log.go
+
               mv ./cri-containerd.test.exe $OUT_DIR
+              mv ./functional.test.exe $OUT_DIR
               mv ./sample-logging-driver.exe $OUT_DIR
-              cd ..
             env:
               GOOS: windows
               OUT_DIR: '$(Build.StagingDirectory)/out'
               GOFLAGS: -mod=mod
+            workingDirectory: test
             displayName: build test binaries
 
           - script: |
