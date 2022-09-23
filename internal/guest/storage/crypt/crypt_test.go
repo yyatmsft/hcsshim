@@ -14,7 +14,7 @@ import (
 
 const tempDir = "/tmp/dir/"
 
-func ioutilTempDirTest(dir string, pattern string) (string, error) {
+func osMkdirTempTest(dir string, pattern string) (string, error) {
 	return tempDir, nil
 }
 
@@ -27,7 +27,7 @@ func clearCryptTestDependencies() {
 	_generateKeyFile = nil
 	_getBlockDeviceSize = nil
 	_mkfsExt4Command = nil
-	_ioutilTempDir = ioutilTempDirTest
+	_osMkdirTemp = osMkdirTempTest
 	_osRemoveAll = nil
 }
 
@@ -425,7 +425,7 @@ func Test_Cleanup_Dm_Crypt_Error(t *testing.T) {
 func Test_Cleanup_Dm_Crypt_Success(t *testing.T) {
 	clearCryptTestDependencies()
 
-	// Test what happens when cryptsetup succeedes to close an encrypted device.
+	// Test what happens when cryptsetup succeeds to close an encrypted device.
 
 	_cryptsetupClose = func(deviceName string) error {
 		return nil

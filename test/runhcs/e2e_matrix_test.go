@@ -8,7 +8,6 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,7 +18,8 @@ import (
 	"github.com/Microsoft/go-winio/vhd"
 	"github.com/Microsoft/hcsshim/osversion"
 	runhcs "github.com/Microsoft/hcsshim/pkg/go-runhcs"
-	testutilities "github.com/Microsoft/hcsshim/test/functional/utilities"
+	"github.com/Microsoft/hcsshim/test/internal/layers"
+	"github.com/Microsoft/hcsshim/test/internal/require"
 	runc "github.com/containerd/go-runc"
 	"github.com/opencontainers/runtime-tools/generate"
 	"github.com/pkg/errors"
@@ -152,7 +152,7 @@ func getWindowsImageNameByVersion(t *testing.T, bv int) string {
 }
 
 func readPidFile(path string) (int, error) {
-	data, err := ioutil.ReadFile(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return -1, errors.Wrap(err, "failed to read pidfile")
 	}
@@ -167,7 +167,7 @@ func testWindows(t *testing.T, version int, isolated bool) {
 	var err error
 
 	// Make the bundle
-	bundle := testutilities.CreateTempDir(t)
+	bundle := t.TempDir()
 	defer func() {
 		if err == nil {
 			os.RemoveAll(bundle)
@@ -175,9 +175,9 @@ func testWindows(t *testing.T, version int, isolated bool) {
 			t.Errorf("additional logs at bundle path: %v", bundle)
 		}
 	}()
-	scratch := testutilities.CreateTempDir(t)
+	scratch := t.TempDir()
 	defer func() {
-		vhd.DetachVhd(filepath.Join(scratch, "sandbox.vhdx"))
+		_ = vhd.DetachVhd(filepath.Join(scratch, "sandbox.vhdx"))
 		os.RemoveAll(scratch)
 	}()
 
@@ -195,7 +195,8 @@ func testWindows(t *testing.T, version int, isolated bool) {
 
 	// Get the LayerFolders
 	imageName := getWindowsImageNameByVersion(t, version)
-	layers := testutilities.LayerFolders(t, imageName)
+	//nolint:staticcheck // SA1019: TODO: replace `LayerFolders`
+	layers := layers.LayerFolders(t, imageName)
 	for _, layer := range layers {
 		g.AddWindowsLayerFolders(layer)
 	}
@@ -242,7 +243,7 @@ func testWindows(t *testing.T, version int, isolated bool) {
 		return
 	}
 	defer func() {
-		rhcs.Delete(ctx, t.Name(), &runhcs.DeleteOpts{Force: true})
+		_ = rhcs.Delete(ctx, t.Name(), &runhcs.DeleteOpts{Force: true})
 	}()
 
 	// Find the shim/vmshim process and begin exit wait
@@ -265,7 +266,7 @@ func testWindows(t *testing.T, version int, isolated bool) {
 	}
 	defer func() {
 		if err != nil {
-			rhcs.Kill(ctx, t.Name(), "CtrlC")
+			_ = rhcs.Kill(ctx, t.Name(), "CtrlC")
 		}
 	}()
 
@@ -286,7 +287,7 @@ func testWindows(t *testing.T, version int, isolated bool) {
 	}
 
 	// Wait for the relay to exit
-	tio.Wait()
+	_ = tio.Wait()
 	outString := tio.outBuff.String()
 	if outString != "Hello World!\r\n" {
 		t.Errorf("stdout expected: 'Hello World!', got: '%v'", outString)
@@ -311,25 +312,25 @@ func testLCOWPod(t *testing.T) {
 }
 
 func Test_RS1_Argon(t *testing.T) {
-	testutilities.RequiresExactBuild(t, osversion.RS1)
+	require.ExactBuild(t, osversion.RS1)
 
 	testWindows(t, osversion.RS1, false)
 }
 
 func Test_RS1_Xenon(t *testing.T) {
-	testutilities.RequiresExactBuild(t, osversion.RS1)
+	require.ExactBuild(t, osversion.RS1)
 
 	testWindows(t, osversion.RS1, true)
 }
 
 func Test_RS3_Argon(t *testing.T) {
-	testutilities.RequiresExactBuild(t, osversion.RS3)
+	require.ExactBuild(t, osversion.RS3)
 
 	testWindows(t, osversion.RS3, false)
 }
 
 func Test_RS3_Xenon(t *testing.T) {
-	testutilities.RequiresExactBuild(t, osversion.RS3)
+	require.ExactBuild(t, osversion.RS3)
 
 	guests := []int{osversion.RS1, osversion.RS3}
 	for _, g := range guests {
@@ -338,13 +339,13 @@ func Test_RS3_Xenon(t *testing.T) {
 }
 
 func Test_RS4_Argon(t *testing.T) {
-	testutilities.RequiresExactBuild(t, osversion.RS4)
+	require.ExactBuild(t, osversion.RS4)
 
 	testWindows(t, osversion.RS4, false)
 }
 
 func Test_RS4_Xenon(t *testing.T) {
-	testutilities.RequiresExactBuild(t, osversion.RS4)
+	require.ExactBuild(t, osversion.RS4)
 
 	guests := []int{osversion.RS1, osversion.RS3, osversion.RS4}
 	for _, g := range guests {
@@ -353,19 +354,19 @@ func Test_RS4_Xenon(t *testing.T) {
 }
 
 func Test_RS5_Argon(t *testing.T) {
-	testutilities.RequiresExactBuild(t, osversion.RS5)
+	require.ExactBuild(t, osversion.RS5)
 
 	testWindows(t, osversion.RS5, false)
 }
 
 func Test_RS5_ArgonPods(t *testing.T) {
-	testutilities.RequiresExactBuild(t, osversion.RS5)
+	require.ExactBuild(t, osversion.RS5)
 
 	testWindowsPod(t, osversion.RS5, false)
 }
 
 func Test_RS5_UVMAndContainer(t *testing.T) {
-	testutilities.RequiresExactBuild(t, osversion.RS5)
+	require.ExactBuild(t, osversion.RS5)
 
 	guests := []int{osversion.RS1, osversion.RS3, osversion.RS4, osversion.RS5}
 	for _, g := range guests {
@@ -374,19 +375,19 @@ func Test_RS5_UVMAndContainer(t *testing.T) {
 }
 
 func Test_RS5_UVMPods(t *testing.T) {
-	testutilities.RequiresExactBuild(t, osversion.RS5)
+	require.ExactBuild(t, osversion.RS5)
 
 	testWindowsPod(t, osversion.RS5, true)
 }
 
 func Test_RS5_LCOW(t *testing.T) {
-	testutilities.RequiresExactBuild(t, osversion.RS5)
+	require.ExactBuild(t, osversion.RS5)
 
 	testLCOW(t)
 }
 
 func Test_RS5_LCOW_UVMPods(t *testing.T) {
-	testutilities.RequiresExactBuild(t, osversion.RS5)
+	require.ExactBuild(t, osversion.RS5)
 
 	testLCOWPod(t)
 }

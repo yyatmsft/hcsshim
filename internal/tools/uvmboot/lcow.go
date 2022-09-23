@@ -246,7 +246,7 @@ func createLCOWOptions(_ context.Context, c *cli.Context, id string) (*uvm.Optio
 	}
 	options.SecurityPolicy = openPolicy
 	if c.IsSet(securityPolicyArgName) {
-		options.SecurityPolicy = c.String(options.SecurityPolicy)
+		options.SecurityPolicy = c.String(securityPolicyArgName)
 	}
 	if c.IsSet(securityHardwareFlag) {
 		options.GuestStateFile = uvm.GuestStateFile
@@ -268,7 +268,7 @@ func runLCOW(ctx context.Context, options *uvm.OptionsLCOW, c *cli.Context) erro
 		return err
 	}
 
-	if err := vm.SetSecurityPolicy(ctx, options.SecurityPolicy); err != nil {
+	if err := vm.SetConfidentialUVMOptions(ctx, uvm.WithSecurityPolicy(options.SecurityPolicy)); err != nil {
 		return fmt.Errorf("could not set UVM security policy: %w", err)
 	}
 

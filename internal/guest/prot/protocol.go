@@ -15,7 +15,6 @@ import (
 	hcsschema "github.com/Microsoft/hcsshim/internal/hcs/schema2"
 	"github.com/Microsoft/hcsshim/internal/protocol/guestrequest"
 	"github.com/Microsoft/hcsshim/internal/protocol/guestresource"
-	"github.com/Microsoft/hcsshim/pkg/securitypolicy"
 )
 
 //////////// Code for the Message Header ////////////
@@ -579,11 +578,17 @@ func UnmarshalContainerModifySettings(b []byte) (*ContainerModifySettings, error
 		}
 		msr.Settings = cc
 	case guestresource.ResourceTypeSecurityPolicy:
-		policy := &securitypolicy.EncodedSecurityPolicy{}
-		if err := commonutils.UnmarshalJSONWithHresult(msrRawSettings, policy); err != nil {
-			return &request, errors.Wrap(err, "failed to unmarshal settings as EncodedSecurityPolicy")
+		enforcer := &guestresource.LCOWConfidentialOptions{}
+		if err := commonutils.UnmarshalJSONWithHresult(msrRawSettings, enforcer); err != nil {
+			return &request, errors.Wrap(err, "failed to unmarshal settings as LCOWConfidentialOptions")
 		}
-		msr.Settings = policy
+		msr.Settings = enforcer
+	case guestresource.ResourceTypePolicyFragment:
+		fragment := &guestresource.LCOWSecurityPolicyFragment{}
+		if err := commonutils.UnmarshalJSONWithHresult(msrRawSettings, fragment); err != nil {
+			return &request, errors.Wrap(err, "failed to unmarshal settings as LCOWSecurityPolicyFragment")
+		}
+		msr.Settings = fragment
 	default:
 		return &request, errors.Errorf("invalid ResourceType '%s'", msr.ResourceType)
 	}
@@ -721,9 +726,9 @@ type SchemaVersion struct {
 
 // Cmp compares s and v and returns:
 //
-// -1 if s <  v
-//  0 if s == v
-//  1 if s >  v
+//	-1 if s <  v
+//	0 if s == v
+//	1 if s >  v
 func (s *SchemaVersion) Cmp(v SchemaVersion) int {
 	if s.Major == v.Major {
 		if s.Minor == v.Minor {

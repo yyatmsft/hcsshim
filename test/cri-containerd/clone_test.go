@@ -14,7 +14,7 @@ import (
 
 	"github.com/Microsoft/hcsshim/osversion"
 	"github.com/Microsoft/hcsshim/pkg/annotations"
-	testutilities "github.com/Microsoft/hcsshim/test/functional/utilities"
+	"github.com/Microsoft/hcsshim/test/internal/require"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
 )
 
@@ -157,7 +157,14 @@ func createPodAndContainer(ctx context.Context, t *testing.T, client runtime.Run
 // actually saved.
 // It is the callers responsibility to clean the stop and remove the cloned
 // containers and pods.
-func createTemplateContainer(ctx context.Context, t *testing.T, client runtime.RuntimeServiceClient, templateSandboxRequest *runtime.RunPodSandboxRequest, templateContainerRequest *runtime.CreateContainerRequest, templatePodID, templateContainerID *string) {
+func createTemplateContainer(
+	ctx context.Context,
+	t *testing.T,
+	client runtime.RuntimeServiceClient,
+	templateSandboxRequest *runtime.RunPodSandboxRequest,
+	templateContainerRequest *runtime.CreateContainerRequest,
+	templatePodID, templateContainerID *string,
+) {
 	createPodAndContainer(ctx, t, client, templateSandboxRequest, templateContainerRequest, templatePodID, templateContainerID)
 
 	// Send a context with deadline for waitForTemplateSave function
@@ -165,32 +172,22 @@ func createTemplateContainer(ctx context.Context, t *testing.T, client runtime.R
 	ctx, cancel := context.WithDeadline(ctx, d)
 	defer cancel()
 	waitForTemplateSave(ctx, t, *templatePodID)
-	return
 }
 
 // Creates a clone from the given template pod and container.
 // It is the callers responsibility to clean the stop and remove the cloned
 // containers and pods.
-func createClonedContainer(ctx context.Context, t *testing.T, client runtime.RuntimeServiceClient, templatePodID, templateContainerID string, cloneNumber int, clonedPodID, clonedContainerID *string) {
+func createClonedContainer(
+	ctx context.Context,
+	t *testing.T,
+	client runtime.RuntimeServiceClient,
+	templatePodID, templateContainerID string,
+	cloneNumber int,
+	clonedPodID, clonedContainerID *string,
+) {
 	cloneSandboxRequest := getClonedPodConfig(cloneNumber, templatePodID)
 	cloneContainerRequest := getClonedContainerConfig(cloneNumber, templateContainerID)
 	createPodAndContainer(ctx, t, client, cloneSandboxRequest, cloneContainerRequest, clonedPodID, clonedContainerID)
-	return
-}
-
-func verifyTemplateContainerState(ctx context.Context, t *testing.T, client runtime.RuntimeServiceClient, templateContainerID string) {
-	// sometimes it takes a little longer for containerd to update status of the template container
-	// so check it in a loop.
-	tries := 3
-	var templateContainerState runtime.ContainerState
-	for i := 0; i < tries; i++ {
-		templateContainerState := getContainerStatus(t, client, ctx, templateContainerID)
-		if templateContainerState == runtime.ContainerState_CONTAINER_EXITED {
-			return
-		}
-		time.Sleep(1 * time.Second)
-	}
-	t.Fatalf("template container %s expected state EXITED actual: %s", templateContainerID, runtime.ContainerState_name[int32(templateContainerState)])
 }
 
 // Runs a command inside given container and verifies if the command executes successfully.
@@ -240,7 +237,7 @@ func cleanupContainer(t *testing.T, client runtime.RuntimeServiceClient, ctx con
 // cloned container from that template.
 func Test_CloneContainer_WCOW(t *testing.T) {
 	requireFeatures(t, featureWCOWHypervisor)
-	testutilities.RequiresBuild(t, osversion.V20H2)
+	require.Build(t, osversion.V20H2)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -257,7 +254,7 @@ func Test_CloneContainer_WCOW(t *testing.T) {
 	pullRequiredImages(t, []string{imageWindowsNanoserver})
 
 	createTemplateContainer(ctx, t, client, getTemplatePodConfig("templatepod"), getTemplateContainerConfig("templatecontainer"), &templatePodID, &templateContainerID)
-	verifyTemplateContainerState(ctx, t, client, templateContainerID)
+	requireContainerState(ctx, t, client, templateContainerID, runtime.ContainerState_CONTAINER_EXITED)
 	createClonedContainer(ctx, t, client, templatePodID, templateContainerID, 1, &clonedPodID, &clonedContainerID)
 	verifyContainerExec(ctx, t, client, clonedContainerID)
 }
@@ -265,7 +262,7 @@ func Test_CloneContainer_WCOW(t *testing.T) {
 // A test for creating multiple clones(3 clones) from one template container.
 func Test_MultiplClonedContainers_WCOW(t *testing.T) {
 	requireFeatures(t, featureWCOWHypervisor)
-	testutilities.RequiresBuild(t, osversion.V20H2)
+	require.Build(t, osversion.V20H2)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -286,7 +283,7 @@ func Test_MultiplClonedContainers_WCOW(t *testing.T) {
 
 	// create template pod & container
 	createTemplateContainer(ctx, t, client, getTemplatePodConfig("templatepod"), getTemplateContainerConfig("templatecontainer"), &templatePodID, &templateContainerID)
-	verifyTemplateContainerState(ctx, t, client, templateContainerID)
+	requireContainerState(ctx, t, client, templateContainerID, runtime.ContainerState_CONTAINER_EXITED)
 
 	// create multiple clones
 	for i := 0; i < nClones; i++ {
@@ -302,7 +299,7 @@ func Test_MultiplClonedContainers_WCOW(t *testing.T) {
 // container.
 func Test_NormalContainerInClonedPod_WCOW(t *testing.T) {
 	requireFeatures(t, featureWCOWHypervisor)
-	testutilities.RequiresBuild(t, osversion.V20H2)
+	require.Build(t, osversion.V20H2)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -320,7 +317,7 @@ func Test_NormalContainerInClonedPod_WCOW(t *testing.T) {
 
 	// create template pod & container
 	createTemplateContainer(ctx, t, client, getTemplatePodConfig("templatepod"), getTemplateContainerConfig("templatecontainer"), &templatePodID, &templateContainerID)
-	verifyTemplateContainerState(ctx, t, client, templateContainerID)
+	requireContainerState(ctx, t, client, templateContainerID, runtime.ContainerState_CONTAINER_EXITED)
 
 	// create a cloned pod and a cloned container
 	cloneSandboxRequest := getClonedPodConfig(1, templatePodID)
@@ -342,7 +339,7 @@ func Test_NormalContainerInClonedPod_WCOW(t *testing.T) {
 // of those pods.
 func Test_CloneContainersWithClonedPodPool_WCOW(t *testing.T) {
 	requireFeatures(t, featureWCOWHypervisor)
-	testutilities.RequiresBuild(t, osversion.V20H2)
+	require.Build(t, osversion.V20H2)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -363,7 +360,7 @@ func Test_CloneContainersWithClonedPodPool_WCOW(t *testing.T) {
 
 	// create template pod & container
 	createTemplateContainer(ctx, t, client, getTemplatePodConfig("templatepod"), getTemplateContainerConfig("templatecontainer"), &templatePodID, &templateContainerID)
-	verifyTemplateContainerState(ctx, t, client, templateContainerID)
+	requireContainerState(ctx, t, client, templateContainerID, runtime.ContainerState_CONTAINER_EXITED)
 
 	// create multiple pods
 	clonedSandboxRequests := []*runtime.RunPodSandboxRequest{}
@@ -390,7 +387,7 @@ func Test_CloneContainersWithClonedPodPool_WCOW(t *testing.T) {
 
 func Test_ClonedContainerRunningAfterDeletingTemplate(t *testing.T) {
 	requireFeatures(t, featureWCOWHypervisor)
-	testutilities.RequiresBuild(t, osversion.V20H2)
+	require.Build(t, osversion.V20H2)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -407,7 +404,7 @@ func Test_ClonedContainerRunningAfterDeletingTemplate(t *testing.T) {
 	pullRequiredImages(t, []string{imageWindowsNanoserver})
 
 	createTemplateContainer(ctx, t, client, getTemplatePodConfig("templatepod"), getTemplateContainerConfig("templatecontainer"), &templatePodID, &templateContainerID)
-	verifyTemplateContainerState(ctx, t, client, templateContainerID)
+	requireContainerState(ctx, t, client, templateContainerID, runtime.ContainerState_CONTAINER_EXITED)
 
 	createClonedContainer(ctx, t, client, templatePodID, templateContainerID, 1, &clonedPodID, &clonedContainerID)
 
@@ -420,11 +417,11 @@ func Test_ClonedContainerRunningAfterDeletingTemplate(t *testing.T) {
 	verifyContainerExec(ctx, t, client, clonedContainerID)
 }
 
-// A test to verify that multiple templats can be created and clones
+// A test to verify that multiple templates can be created and clones
 // can be made from each of them simultaneously.
 func Test_MultipleTemplateAndClones_WCOW(t *testing.T) {
 	requireFeatures(t, featureWCOWHypervisor)
-	testutilities.RequiresBuild(t, osversion.V20H2)
+	require.Build(t, osversion.V20H2)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -450,7 +447,7 @@ func Test_MultipleTemplateAndClones_WCOW(t *testing.T) {
 		go func(index int) {
 			defer wg.Done()
 			createTemplateContainer(ctx, t, client, getTemplatePodConfig(fmt.Sprintf("templatepod-%d", index)), getTemplateContainerConfig(fmt.Sprintf("templatecontainer-%d", index)), &templatePodIDs[index], &templateContainerIDs[index])
-			verifyTemplateContainerState(ctx, t, client, templateContainerIDs[index])
+			requireContainerState(ctx, t, client, templateContainerIDs[index], runtime.ContainerState_CONTAINER_EXITED)
 			createClonedContainer(ctx, t, client, templatePodIDs[index], templateContainerIDs[index], index, &clonedPodIDs[index], &clonedContainerIDs[index])
 		}(i)
 	}
@@ -467,7 +464,7 @@ func Test_MultipleTemplateAndClones_WCOW(t *testing.T) {
 // and verifies that the request correctly fails with an error.
 func Test_VerifyCloneAndTemplateConfig(t *testing.T) {
 	requireFeatures(t, featureWCOWHypervisor)
-	testutilities.RequiresBuild(t, osversion.V20H2)
+	require.Build(t, osversion.V20H2)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -485,7 +482,7 @@ func Test_VerifyCloneAndTemplateConfig(t *testing.T) {
 	templatePodConfig := getTemplatePodConfig("templatepod")
 
 	createTemplateContainer(ctx, t, client, templatePodConfig, getTemplateContainerConfig("templatecontainer"), &templatePodID, &templateContainerID)
-	verifyTemplateContainerState(ctx, t, client, templateContainerID)
+	requireContainerState(ctx, t, client, templateContainerID, runtime.ContainerState_CONTAINER_EXITED)
 
 	// change pod config to make sure the request fails
 	cloneSandboxRequest := getClonedPodConfig(0, templatePodID)

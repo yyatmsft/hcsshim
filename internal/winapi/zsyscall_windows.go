@@ -73,6 +73,7 @@ var (
 	procCM_Get_Device_ID_ListA                 = modcfgmgr32.NewProc("CM_Get_Device_ID_ListA")
 	procCM_Locate_DevNodeW                     = modcfgmgr32.NewProc("CM_Locate_DevNodeW")
 	procCM_Get_DevNode_PropertyW               = modcfgmgr32.NewProc("CM_Get_DevNode_PropertyW")
+	procCopyFileW                              = modkernel32.NewProc("CopyFileW")
 	procNtCreateFile                           = modntdll.NewProc("NtCreateFile")
 	procNtSetInformationFile                   = modntdll.NewProc("NtSetInformationFile")
 	procNtOpenDirectoryObject                  = modntdll.NewProc("NtOpenDirectoryObject")
@@ -217,14 +218,8 @@ func QueryInformationJobObject(jobHandle windows.Handle, infoClass uint32, jobOb
 	return
 }
 
-func OpenJobObject(desiredAccess uint32, inheritHandle bool, lpName *uint16) (handle windows.Handle, err error) {
-	var _p0 uint32
-	if inheritHandle {
-		_p0 = 1
-	} else {
-		_p0 = 0
-	}
-	r0, _, e1 := syscall.Syscall(procOpenJobObjectW.Addr(), 3, uintptr(desiredAccess), uintptr(_p0), uintptr(unsafe.Pointer(lpName)))
+func OpenJobObject(desiredAccess uint32, inheritHandle int32, lpName *uint16) (handle windows.Handle, err error) {
+	r0, _, e1 := syscall.Syscall(procOpenJobObjectW.Addr(), 3, uintptr(desiredAccess), uintptr(inheritHandle), uintptr(unsafe.Pointer(lpName)))
 	handle = windows.Handle(r0)
 	if handle == 0 {
 		if e1 != 0 {
@@ -358,6 +353,18 @@ func CMGetDevNodeProperty(dnDevInst uint32, propertyKey *DevPropKey, propertyTyp
 			r0 &= 0xffff
 		}
 		hr = syscall.Errno(r0)
+	}
+	return
+}
+
+func CopyFileW(existingFileName *uint16, newFileName *uint16, failIfExists int32) (err error) {
+	r1, _, e1 := syscall.Syscall(procCopyFileW.Addr(), 3, uintptr(unsafe.Pointer(existingFileName)), uintptr(unsafe.Pointer(newFileName)), uintptr(failIfExists))
+	if r1 == 0 {
+		if e1 != 0 {
+			err = errnoErr(e1)
+		} else {
+			err = syscall.EINVAL
+		}
 	}
 	return
 }

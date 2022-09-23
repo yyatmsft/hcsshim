@@ -6,7 +6,6 @@ package scsi
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path"
 	"path/filepath"
@@ -28,7 +27,7 @@ import (
 	"github.com/Microsoft/hcsshim/pkg/securitypolicy"
 )
 
-// Test dependencies
+// Test dependencies.
 var (
 	osMkdirAll  = os.MkdirAll
 	osRemoveAll = os.RemoveAll
@@ -36,9 +35,9 @@ var (
 
 	// controllerLunToName is stubbed to make testing `Mount` easier.
 	controllerLunToName = ControllerLunToName
-	// createVerityTarget is stubbed for unit testing `Mount`
+	// createVerityTarget is stubbed for unit testing `Mount`.
 	createVerityTarget = dm.CreateVerityTarget
-	// removeDevice is stubbed for unit testing `Mount`
+	// removeDevice is stubbed for unit testing `Mount`.
 	removeDevice = dm.RemoveDevice
 )
 
@@ -56,12 +55,12 @@ const (
 // inside the UVM. However, we can refer to the SCSI controllers with their GUIDs (that
 // are hardcoded) and then using that GUID find out the SCSI controller number inside the
 // guest. This function does exactly that.
-func fetchActualControllerNumber(ctx context.Context, passedController uint8) (uint8, error) {
+func fetchActualControllerNumber(_ context.Context, passedController uint8) (uint8, error) {
 	// find the controller number by looking for a file named host<N> (e.g host1, host3 etc.)
 	// `N` is the controller number.
 	// Full file path would be /sys/bus/vmbus/devices/<controller-guid>/host<N>.
 	controllerDirPath := path.Join(vmbusDevicesPath, guestrequest.ScsiControllerGuids[passedController])
-	entries, err := ioutil.ReadDir(controllerDirPath)
+	entries, err := os.ReadDir(controllerDirPath)
 	if err != nil {
 		return 0, err
 	}
@@ -145,7 +144,7 @@ func mount(
 	}
 	defer func() {
 		if err != nil {
-			osRemoveAll(target)
+			_ = osRemoveAll(target)
 		}
 	}()
 
@@ -170,7 +169,7 @@ func mount(
 			// The `source` found by controllerLunToName can take some time
 			// before its actually available under `/dev/sd*`. Retry while we
 			// wait for `source` to show up.
-			if err == unix.ENOENT {
+			if errors.Is(err, unix.ENOENT) {
 				select {
 				case <-ctx.Done():
 					return ctx.Err()
@@ -297,9 +296,9 @@ func ControllerLunToName(ctx context.Context, controller, lun uint8) (_ string, 
 	// Devices matching the given SCSI code should each have a subdirectory
 	// under /sys/bus/scsi/devices/<scsiID>/block.
 	blockPath := filepath.Join(scsiDevicesPath, scsiID, "block")
-	var deviceNames []os.FileInfo
+	var deviceNames []os.DirEntry
 	for {
-		deviceNames, err = ioutil.ReadDir(blockPath)
+		deviceNames, err = os.ReadDir(blockPath)
 		if err != nil && !os.IsNotExist(err) {
 			return "", err
 		}
