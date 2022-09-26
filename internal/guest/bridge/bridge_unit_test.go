@@ -7,7 +7,6 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"io"
-	"io/ioutil"
 	"os"
 	"strings"
 	"sync"
@@ -40,7 +39,7 @@ type thandler struct {
 	err  error
 }
 
-func (h *thandler) ServeMsg(r *Request) (RequestResponse, error) {
+func (h *thandler) ServeMsg(_ *Request) (RequestResponse, error) {
 	h.set = true
 	return h.resp, h.err
 }
@@ -85,7 +84,7 @@ func Test_Bridge_Mux_Handle_Succeeds(t *testing.T) {
 	}
 
 	// Is it the correct handler?
-	hOut.ServeMsg(nil)
+	_, _ = hOut.ServeMsg(nil)
 
 	if !th.set {
 		t.Error("The handler added was not the same handler.")
@@ -140,7 +139,7 @@ func Test_Bridge_Mux_HandleFunc_Succeeds(t *testing.T) {
 	}
 
 	// Is it the correct handler?
-	hOut.ServeMsg(nil)
+	_, _ = hOut.ServeMsg(nil)
 
 	if !set {
 		t.Error("The handler added was not the same handler.")
@@ -369,10 +368,12 @@ func Test_Bridge_Mux_ServeMsg_Success(t *testing.T) {
 	}
 }
 
+//nolint:unused // may be used in future tests
 type errorTransport struct {
 	e error
 }
 
+//nolint:unused // may be used in future tests
 func (e *errorTransport) Dial(_ uint32) (transport.Connection, error) {
 	return nil, e.e
 }
@@ -383,7 +384,7 @@ func serverSend(conn io.Writer, messageType prot.MessageIdentifier, messageID pr
 		var err error
 		body, err = json.Marshal(i)
 		if err != nil {
-			return errors.Wrap(err, "Failed to json marshal to server.")
+			return errors.Wrap(err, "failed to json marshal to server.")
 		}
 	}
 
@@ -455,7 +456,7 @@ func newLoopbackConnection() *loopbackConnection {
 
 func Test_Bridge_ListenAndServe_UnknownMessageHandler_Success(t *testing.T) {
 	// Turn off logging so as not to spam output.
-	logrus.SetOutput(ioutil.Discard)
+	logrus.SetOutput(io.Discard)
 
 	lc := newLoopbackConnection()
 	defer lc.close()
@@ -509,7 +510,7 @@ func Test_Bridge_ListenAndServe_UnknownMessageHandler_Success(t *testing.T) {
 
 func Test_Bridge_ListenAndServe_CorrectHandler_Success(t *testing.T) {
 	// Turn off logging so as not to spam output.
-	logrus.SetOutput(ioutil.Discard)
+	logrus.SetOutput(io.Discard)
 
 	lc := newLoopbackConnection()
 	defer lc.close()
@@ -590,7 +591,7 @@ func Test_Bridge_ListenAndServe_CorrectHandler_Success(t *testing.T) {
 
 func Test_Bridge_ListenAndServe_HandlersAreAsync_Success(t *testing.T) {
 	// Turn off logging so as not to spam output.
-	logrus.SetOutput(ioutil.Discard)
+	logrus.SetOutput(io.Discard)
 
 	lc := newLoopbackConnection()
 	defer lc.close()

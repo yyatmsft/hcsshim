@@ -4,8 +4,8 @@
 package devicemapper
 
 import (
+	"errors"
 	"flag"
-	"io/ioutil"
 	"os"
 	"syscall"
 	"testing"
@@ -46,15 +46,13 @@ func validateDevice(t *testing.T, p string, sectors int64, writable bool) {
 
 	var b [512]byte
 	_, err = unix.Read(int(dev.Fd()), b[:])
-	if err != unix.EIO {
+	if !errors.Is(err, unix.EIO) {
 		t.Fatalf("expected EIO, got %s", err)
 	}
 	_, err = unix.Write(int(dev.Fd()), b[:])
-	if writable {
-		if err != unix.EIO {
-			t.Fatalf("expected EIO, got %s", err)
-		}
-	} else if err != unix.EPERM {
+	if writable && !errors.Is(err, unix.EIO) {
+		t.Fatalf("expected EIO, got %s", err)
+	} else if !errors.Is(err, unix.EPERM) {
 		t.Fatalf("expected EPERM, got %s", err)
 	}
 
@@ -71,7 +69,7 @@ func (d *device) Close() (err error) {
 			d.Name = ""
 		}
 	}
-	return
+	return err
 }
 
 func createDevice(name string, flags CreateFlags, targets []Target) (*device, error) {
@@ -162,7 +160,7 @@ func TestRemoveDeviceRetriesOnSyscallEBUSY(t *testing.T) {
 	retryDone := false
 	// Overrides openMapper to return temp file handle
 	openMapperWrapper = func() (*os.File, error) {
-		return ioutil.TempFile("", "")
+		return os.CreateTemp("", "")
 	}
 	removeDeviceWrapper = func(_ *os.File, _ string) error {
 		if !rmDeviceCalled {
@@ -200,7 +198,7 @@ func TestRemoveDeviceFailsOnNonSyscallEBUSY(t *testing.T) {
 	rmDeviceCalled := false
 	retryDone := false
 	openMapperWrapper = func() (*os.File, error) {
-		return ioutil.TempFile("", "")
+		return os.CreateTemp("", "")
 	}
 	removeDeviceWrapper = func(_ *os.File, _ string) error {
 		if !rmDeviceCalled {
@@ -214,7 +212,7 @@ func TestRemoveDeviceFailsOnNonSyscallEBUSY(t *testing.T) {
 		return nil
 	}
 
-	if err := RemoveDevice("test"); err != expectedError {
+	if err := RemoveDevice("test"); err != expectedError { //nolint:errorlint
 		t.Fatalf("expected error %q, instead got %q", expectedError, err)
 	}
 	if !rmDeviceCalled {

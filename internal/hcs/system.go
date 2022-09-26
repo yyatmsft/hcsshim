@@ -316,6 +316,10 @@ func (computeSystem *System) Properties(ctx context.Context, types ...schema1.Pr
 
 	operation := "hcs::System::Properties"
 
+	if computeSystem.handle == 0 {
+		return nil, makeSystemError(computeSystem, operation, ErrAlreadyClosed, nil)
+	}
+
 	queryBytes, err := json.Marshal(schema1.PropertyQuery{PropertyTypes: types})
 	if err != nil {
 		return nil, makeSystemError(computeSystem, operation, err, nil)
@@ -409,7 +413,7 @@ func (computeSystem *System) statisticsInProc(job *jobobject.JobObject) (*hcssch
 	// as well which isn't great and is wasted work to fetch.
 	//
 	// HCS only let's you grab statistics in an all or nothing fashion, so we can't just grab the private
-	// working set ourselves and ask for everything else seperately. The optimization we can make here is
+	// working set ourselves and ask for everything else separately. The optimization we can make here is
 	// to open the silo ourselves and do the same queries for the rest of the info, as well as calculating
 	// the private working set in a more efficient manner by:
 	//
@@ -448,6 +452,10 @@ func (computeSystem *System) statisticsInProc(job *jobobject.JobObject) (*hcssch
 // hcsPropertiesV2Query is a helper to make a HcsGetComputeSystemProperties call using the V2 schema property types.
 func (computeSystem *System) hcsPropertiesV2Query(ctx context.Context, types []hcsschema.PropertyType) (*hcsschema.Properties, error) {
 	operation := "hcs::System::PropertiesV2"
+
+	if computeSystem.handle == 0 {
+		return nil, makeSystemError(computeSystem, operation, ErrAlreadyClosed, nil)
+	}
 
 	queryBytes, err := json.Marshal(hcsschema.PropertyQuery{PropertyTypes: types})
 	if err != nil {
@@ -497,7 +505,7 @@ func (computeSystem *System) PropertiesV2(ctx context.Context, types ...hcsschem
 	if err == nil && len(fallbackTypes) == 0 {
 		return properties, nil
 	} else if err != nil {
-		logEntry.WithError(fmt.Errorf("failed to query compute system properties in-proc: %w", err))
+		logEntry = logEntry.WithError(fmt.Errorf("failed to query compute system properties in-proc: %w", err))
 		fallbackTypes = types
 	}
 

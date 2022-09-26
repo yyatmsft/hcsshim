@@ -4,6 +4,8 @@
 package policy
 
 import (
+	"syscall"
+
 	oci "github.com/opencontainers/runtime-spec/specs-go"
 
 	"github.com/Microsoft/hcsshim/pkg/securitypolicy"
@@ -35,15 +37,7 @@ func (p *MountMonitoringSecurityPolicyEnforcer) EnforceOverlayMountPolicy(_ stri
 	return nil
 }
 
-func (MountMonitoringSecurityPolicyEnforcer) EnforceCreateContainerPolicy(_ string, _ []string, _ []string, _ string) error {
-	return nil
-}
-
-func (MountMonitoringSecurityPolicyEnforcer) EnforceMountPolicy(_, _ string, _ *oci.Spec) error {
-	return nil
-}
-
-func (MountMonitoringSecurityPolicyEnforcer) EnforceWaitMountPointsPolicy(_ string, _ *oci.Spec) error {
+func (MountMonitoringSecurityPolicyEnforcer) EnforceCreateContainerPolicy(_, _ string, _ []string, _ []string, _ string, _ []oci.Mount) error {
 	return nil
 }
 
@@ -53,4 +47,20 @@ func (MountMonitoringSecurityPolicyEnforcer) ExtendDefaultMounts(_ []oci.Mount) 
 
 func (MountMonitoringSecurityPolicyEnforcer) EncodedSecurityPolicy() string {
 	return ""
+}
+
+func (MountMonitoringSecurityPolicyEnforcer) EnforceExecInContainerPolicy(_ string, _ []string, _ []string, _ string) error {
+	return nil
+}
+
+func (MountMonitoringSecurityPolicyEnforcer) EnforceExecExternalProcessPolicy(_ []string, _ []string, _ string) error {
+	return nil
+}
+
+func (MountMonitoringSecurityPolicyEnforcer) EnforceShutdownContainerPolicy(_ string) error {
+	return nil
+}
+
+func (MountMonitoringSecurityPolicyEnforcer) EnforceSignalContainerProcessPolicy(_ string, _ syscall.Signal, _ bool, _ []string) error {
+	return nil
 }
