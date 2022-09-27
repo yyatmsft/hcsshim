@@ -70,10 +70,12 @@ stages:
 
               go test -gcflags=all=-d=checkptr -c github.com/Microsoft/hcsshim/test/cri-containerd --tags functional
               go test -gcflags=all=-d=checkptr -tags=functional -c github.com/Microsoft/hcsshim/test/functional
+              GOOS=linux go test -gcflags=all=-d=checkptr -tags=functional -c github.com/Microsoft/hcsshim/test/gcs
               go build -o sample-logging-driver.exe cri-containerd/helpers/log.go
 
               mv ./cri-containerd.test.exe $OUT_DIR
               mv ./functional.test.exe $OUT_DIR
+              mv ./gcs.test $OUT_DIR
               mv ./sample-logging-driver.exe $OUT_DIR
             env:
               GOOS: windows
