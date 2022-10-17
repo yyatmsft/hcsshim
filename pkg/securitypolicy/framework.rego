@@ -51,9 +51,13 @@ overlay_exists {
     data.metadata.matches[input.containerID]
 }
 
+overlay_mounted(target) {
+    data.metadata.overlayTargets[target]
+}
+
 default mount_overlay := {"allowed": false}
 
-mount_overlay := {"matches": matches, "allowed": true} {
+mount_overlay := {"matches": matches, "overlayTargets": overlay_targets, "allowed": true} {
     not overlay_exists
     containers := [container |
         some container in data.policy.containers
@@ -64,6 +68,21 @@ mount_overlay := {"matches": matches, "allowed": true} {
         "action": "add",
         "key": input.containerID,
         "value": containers
+    }
+    overlay_targets := {
+        "action": "add",
+        "key": input.target,
+        "value": true
+    }
+}
+
+default unmount_overlay := {"allowed": false}
+
+unmount_overlay := {"overlayTargets": overlay_targets, "allowed": true} {
+    overlay_mounted(input.unmountTarget)
+    overlay_targets := {
+        "action": "remove",
+        "key": input.unmountTarget
     }
 }
 
@@ -147,6 +166,13 @@ mountSource_ok(constraint, source) {
     startswith(constraint, data.hugePagesPrefix)
     newConstraint := replace(constraint, data.hugePagesPrefix, input.hugePagesDir)
     regex.match(newConstraint, source)
+}
+
+mountSource_ok(constraint, source) {
+    startswith(constraint, data.plan9Prefix)
+    some target, containerID in data.metadata.p9mounts
+    source == target
+    input.containerID == containerID
 }
 
 mountSource_ok(constraint, source) {
@@ -264,6 +290,35 @@ signal_ok(signals) {
     input.signal == signal
 }
 
+plan9_mounted(target) {
+    data.metadata.p9mounts[target]
+}
+
+default plan9_mount := {"allowed": false}
+
+plan9_mount := {"p9mounts": p9mounts, "allowed": true} {
+    not plan9_mounted(input.target)
+    some containerID, _ in data.metadata.matches
+    pattern := concat("", [input.rootPrefix, "/", containerID, input.mountPathPrefix])
+    regex.match(pattern, input.target)
+    p9mounts := {
+        "action": "add",
+        "key": input.target,
+        "value": containerID
+    }
+}
+
+default plan9_unmount := {"allowed": false}
+
+plan9_unmount := {"p9mounts": p9mounts, "allowed": true} {
+    plan9_mounted(input.target)
+    p9mounts := {
+        "action": "remove",
+        "key": input.target,
+    }
+}
+
+
 default enforcement_point_info := {"available": false, "allowed": false, "unknown": true, "invalid": false}
 
 enforcement_point_info := {"available": available, "allowed": allowed, "unknown": false, "invalid": false} {
@@ -285,6 +340,18 @@ exec_external := {"allowed": true} {
     command_ok(process.command)
     envList_ok(process.env_rules)
     workingDirectory_ok(process.working_dir)
+}
+
+default get_properties := {"allowed": false}
+
+get_properties := {"allowed": true} {
+    data.policy.allow_properties_access
+}
+
+default dump_stacks := {"allowed": false}
+
+dump_stacks := {"allowed": true} {
+    data.policy.allow_dump_stacks
 }
 
 # error messages
@@ -324,6 +391,11 @@ default overlay_matches := false
 overlay_matches {
     some container in data.policy.containers
     layerPaths_ok(container.layers)
+}
+
+errors["no overlay at path to unmount"] {
+    input.rule == "unmount_overlay"
+    not overlay_mounted(input.unmountTarget)
 }
 
 errors["no matching containers for overlay"] {
@@ -424,4 +496,14 @@ signal_allowed {
 errors["target isn't allowed to receive the signal"] {
     input.rule == "signal_container_process"
     not signal_allowed
+}
+
+errors["device already mounted at path"] {
+    input.rule == "plan9_mount"
+    plan9_mounted(input.target)
+}
+
+errors["no device at path to unmount"] {
+    input.rule == "plan9_unmount"
+    not plan9_mounted(input.unmountTarget)
 }

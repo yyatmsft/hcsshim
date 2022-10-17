@@ -25,9 +25,11 @@ const (
 
 // PolicyConfig contains toml or JSON config for security policy.
 type PolicyConfig struct {
-	AllowAll          bool                    `json:"allow_all" toml:"allow_all"`
-	Containers        []ContainerConfig       `json:"containers" toml:"container"`
-	ExternalProcesses []ExternalProcessConfig `json:"external_processes" toml:"external_process"`
+	AllowAll              bool                    `json:"allow_all" toml:"allow_all"`
+	Containers            []ContainerConfig       `json:"containers" toml:"container"`
+	ExternalProcesses     []ExternalProcessConfig `json:"external_processes" toml:"external_process"`
+	AllowPropertiesAccess bool                    `json:"allow_properties_access" toml:"allow_properties_access"`
+	AllowDumpStacks       bool                    `json:"allow_dump_stacks" toml:"allow_dump_stacks"`
 }
 
 // ExternalProcessConfig contains toml or JSON config for running external processes in the UVM.
@@ -147,14 +149,14 @@ type Containers struct {
 }
 
 type Container struct {
-	Command       CommandArgs `json:"command"`
-	EnvRules      EnvRules    `json:"env_rules"`
-	Layers        Layers      `json:"layers"`
-	WorkingDir    string      `json:"working_dir"`
-	Mounts        Mounts      `json:"mounts"`
-	AllowElevated bool        `json:"allow_elevated"`
-	ExecProcesses []ExecProcessConfig
-	Signals       []syscall.Signal
+	Command       CommandArgs         `json:"command"`
+	EnvRules      EnvRules            `json:"env_rules"`
+	Layers        Layers              `json:"layers"`
+	WorkingDir    string              `json:"working_dir"`
+	Mounts        Mounts              `json:"mounts"`
+	AllowElevated bool                `json:"allow_elevated"`
+	ExecProcesses []ExecProcessConfig `json:"-"`
+	Signals       []syscall.Signal    `json:"-"`
 }
 
 // StringArrayMap wraps an array of strings as a string map.
