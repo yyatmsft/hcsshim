@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 
@@ -45,6 +46,8 @@ var frameworkCode string
 
 //go:embed api.rego
 var apiCode string
+
+const plan9Prefix = "plan9://"
 
 // RegoEnforcer is a stub implementation of a security policy, which will be
 // based on [Rego] policy language. The detailed implementation will be
@@ -108,7 +111,7 @@ func createRegoEnforcer(base64EncodedPolicy string,
 			return createOpenDoorEnforcer(base64EncodedPolicy, defaultMounts, privilegedMounts)
 		}
 
-		code, err = marshalRego(securityPolicy.AllowAll, containers, []ExternalProcessConfig{})
+		code, err = marshalRego(securityPolicy.AllowAll, containers, []ExternalProcessConfig{}, true, true)
 		if err != nil {
 			return nil, fmt.Errorf("error marshaling the policy to Rego: %w", err)
 		}
@@ -138,6 +141,7 @@ func newRegoPolicy(code string, defaultMounts []oci.Mount, privilegedMounts []oc
 		"privilegedMounts": appendMountData(privilegedMountData, privilegedMounts),
 		"sandboxPrefix":    guestpath.SandboxMountPrefix,
 		"hugePagesPrefix":  guestpath.HugePagesMountPrefix,
+		"plan9Prefix":      plan9Prefix,
 	}
 	policy.base64policy = ""
 
@@ -522,13 +526,22 @@ func (policy *regoEnforcer) EnforceDeviceMountPolicy(target string, deviceHash s
 	return policy.enforce("mount_device", input)
 }
 
-func (policy *regoEnforcer) EnforceOverlayMountPolicy(containerID string, layerPaths []string) error {
+func (policy *regoEnforcer) EnforceOverlayMountPolicy(containerID string, layerPaths []string, target string) error {
 	input := map[string]interface{}{
 		"containerID": containerID,
 		"layerPaths":  layerPaths,
+		"target":      target,
 	}
 
 	return policy.enforce("mount_overlay", input)
+}
+
+func (policy *regoEnforcer) EnforceOverlayUnmountPolicy(target string) error {
+	input := map[string]interface{}{
+		"unmountTarget": target,
+	}
+
+	return policy.enforce("unmount_overlay", input)
 }
 
 // Rego does not have a way to determine the OS path separator
@@ -634,4 +647,35 @@ func (policy *regoEnforcer) EnforceSignalContainerProcessPolicy(containerID stri
 	}
 
 	return policy.enforce("signal_container_process", input)
+}
+
+func (policy *regoEnforcer) EnforcePlan9MountPolicy(target string) error {
+	mountPathPrefix := strings.Replace(guestpath.LCOWMountPathPrefixFmt, "%d", "[0-9]+", 1)
+	input := map[string]interface{}{
+		"rootPrefix":      guestpath.LCOWRootPrefixInUVM,
+		"mountPathPrefix": mountPathPrefix,
+		"target":          target,
+	}
+
+	return policy.enforce("plan9_mount", input)
+}
+
+func (policy *regoEnforcer) EnforcePlan9UnmountPolicy(target string) error {
+	input := map[string]interface{}{
+		"target": target,
+	}
+
+	return policy.enforce("plan9_unmount", input)
+}
+
+func (policy *regoEnforcer) EnforceGetPropertiesPolicy() error {
+	input := make(map[string]interface{})
+
+	return policy.enforce("get_properties", input)
+}
+
+func (policy *regoEnforcer) EnforceDumpStacksPolicy() error {
+	input := make(map[string]interface{})
+
+	return policy.enforce("dump_stacks", input)
 }

@@ -14,6 +14,7 @@ import (
 	"testing"
 	"testing/quick"
 
+	"github.com/Microsoft/hcsshim/internal/guestpath"
 	"github.com/open-policy-agent/opa/ast"
 	oci "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/pkg/errors"
@@ -24,6 +25,9 @@ const (
 	maxGeneratedExternalProcesses      = 12
 	maxGeneratedSandboxIDLength        = 32
 	maxGeneratedEnforcementPointLength = 64
+	maxGeneratedPlan9Mounts            = 8
+	maxPlan9MountTargetLength          = 64
+	maxPlan9MountIndex                 = 16
 )
 
 // Validate we do our conversion from Json to rego correctly
@@ -174,7 +178,7 @@ func Test_Rego_EnforceOverlayMountPolicy_No_Matches(t *testing.T) {
 			return false
 		}
 
-		err = tc.policy.EnforceOverlayMountPolicy(tc.containerID, tc.layers)
+		err = tc.policy.EnforceOverlayMountPolicy(tc.containerID, tc.layers, testDataGenerator.uniqueMountTarget())
 
 		if err == nil {
 			return false
@@ -202,7 +206,7 @@ func Test_Rego_EnforceOverlayMountPolicy_Matches(t *testing.T) {
 			return false
 		}
 
-		err = tc.policy.EnforceOverlayMountPolicy(tc.containerID, tc.layers)
+		err = tc.policy.EnforceOverlayMountPolicy(tc.containerID, tc.layers, testDataGenerator.uniqueMountTarget())
 
 		// getting an error means something is broken
 		return err == nil
@@ -240,7 +244,7 @@ func Test_Rego_EnforceOverlayMountPolicy_Layers_With_Same_Root_Hash(t *testing.T
 		t.Fatalf("error creating valid overlay: %v", err)
 	}
 
-	err = policy.EnforceOverlayMountPolicy(containerID, layers)
+	err = policy.EnforceOverlayMountPolicy(containerID, layers, testDataGenerator.uniqueMountTarget())
 	if err != nil {
 		t.Fatalf("Unable to create an overlay where root hashes are the same")
 	}
@@ -290,7 +294,7 @@ func Test_Rego_EnforceOverlayMountPolicy_Layers_Shared_Layers(t *testing.T) {
 		containerOneOverlay[len(containerOneOverlay)-i-1] = mount
 	}
 
-	err = policy.EnforceOverlayMountPolicy(containerID, containerOneOverlay)
+	err = policy.EnforceOverlayMountPolicy(containerID, containerOneOverlay, testDataGenerator.uniqueMountTarget())
 	if err != nil {
 		t.Fatalf("Unexpected error mounting overlay: %v", err)
 	}
@@ -319,7 +323,7 @@ func Test_Rego_EnforceOverlayMountPolicy_Layers_Shared_Layers(t *testing.T) {
 		containerTwoOverlay[len(containerTwoOverlay)-i-1] = mount
 	}
 
-	err = policy.EnforceOverlayMountPolicy(containerID, containerTwoOverlay)
+	err = policy.EnforceOverlayMountPolicy(containerID, containerTwoOverlay, testDataGenerator.uniqueMountTarget())
 	if err != nil {
 		t.Fatalf("Unexpected error mounting overlay: %v", err)
 	}
@@ -340,12 +344,12 @@ func Test_Rego_EnforceOverlayMountPolicy_Overlay_Single_Container_Twice(t *testi
 			return false
 		}
 
-		if err := tc.policy.EnforceOverlayMountPolicy(tc.containerID, tc.layers); err != nil {
+		if err := tc.policy.EnforceOverlayMountPolicy(tc.containerID, tc.layers, testDataGenerator.uniqueMountTarget()); err != nil {
 			t.Errorf("expected nil error got: %v", err)
 			return false
 		}
 
-		if err := tc.policy.EnforceOverlayMountPolicy(tc.containerID, tc.layers); err == nil {
+		if err := tc.policy.EnforceOverlayMountPolicy(tc.containerID, tc.layers, testDataGenerator.uniqueMountTarget()); err == nil {
 			t.Errorf("able to create overlay for the same container twice")
 			return false
 		} else {
@@ -385,7 +389,7 @@ func Test_Rego_EnforceOverlayMountPolicy_Reusing_ID_Across_Overlays(t *testing.T
 		t.Fatalf("Unexpected error creating valid overlay: %v", err)
 	}
 
-	err = policy.EnforceOverlayMountPolicy(containerID, layerPaths)
+	err = policy.EnforceOverlayMountPolicy(containerID, layerPaths, testDataGenerator.uniqueMountTarget())
 	if err != nil {
 		t.Fatalf("Unexpected error mounting overlay filesystem: %v", err)
 	}
@@ -396,7 +400,7 @@ func Test_Rego_EnforceOverlayMountPolicy_Reusing_ID_Across_Overlays(t *testing.T
 		t.Fatalf("Unexpected error creating valid overlay: %v", err)
 	}
 
-	err = policy.EnforceOverlayMountPolicy(containerID, layerPaths)
+	err = policy.EnforceOverlayMountPolicy(containerID, layerPaths, testDataGenerator.uniqueMountTarget())
 	if err == nil {
 		t.Fatalf("Unexpected success mounting overlay filesystem")
 	}
@@ -435,11 +439,70 @@ func Test_Rego_EnforceOverlayMountPolicy_Multiple_Instances_Same_Container(t *te
 			}
 
 			id := testDataGenerator.uniqueContainerID()
-			err = policy.EnforceOverlayMountPolicy(id, layerPaths)
+			err = policy.EnforceOverlayMountPolicy(id, layerPaths, testDataGenerator.uniqueMountTarget())
 			if err != nil {
 				t.Fatalf("failed with %d containers", containersToCreate)
 			}
 		}
+	}
+}
+
+func Test_Rego_EnforceOverlayUnmountPolicy(t *testing.T) {
+	f := func(p *generatedConstraints) bool {
+		tc, err := setupRegoOverlayTest(p, true)
+		if err != nil {
+			t.Error(err)
+			return false
+		}
+
+		target := testDataGenerator.uniqueMountTarget()
+		err = tc.policy.EnforceOverlayMountPolicy(tc.containerID, tc.layers, target)
+		if err != nil {
+			t.Errorf("Failure setting up overlay for testing: %v", err)
+			return false
+		}
+
+		err = tc.policy.EnforceOverlayUnmountPolicy(target)
+		if err != nil {
+			t.Errorf("Unexpected policy enforcement failure: %v", err)
+			return false
+		}
+
+		return true
+	}
+
+	if err := quick.Check(f, &quick.Config{MaxCount: 50, Rand: testRand}); err != nil {
+		t.Errorf("Test_Rego_EnforceOverlayUnmountPolicy: %v", err)
+	}
+}
+
+func Test_Rego_EnforceOverlayUnmountPolicy_No_Matches(t *testing.T) {
+	f := func(p *generatedConstraints) bool {
+		tc, err := setupRegoOverlayTest(p, true)
+		if err != nil {
+			t.Error(err)
+			return false
+		}
+
+		target := testDataGenerator.uniqueMountTarget()
+		err = tc.policy.EnforceOverlayMountPolicy(tc.containerID, tc.layers, target)
+		if err != nil {
+			t.Errorf("Failure setting up overlay for testing: %v", err)
+			return false
+		}
+
+		badTarget := testDataGenerator.uniqueMountTarget()
+		err = tc.policy.EnforceOverlayUnmountPolicy(badTarget)
+		if err == nil {
+			t.Errorf("Unexpected policy enforcement success: %v", err)
+			return false
+		}
+
+		return true
+	}
+
+	if err := quick.Check(f, &quick.Config{MaxCount: 50, Rand: testRand}); err != nil {
+		t.Errorf("Test_Rego_EnforceOverlayUnmountPolicy: %v", err)
 	}
 }
 
@@ -1660,6 +1723,221 @@ func Test_Rego_SignalContainerProcessPolicy_ExecProcess_Bad_ContainerID(t *testi
 	}
 }
 
+func Test_Rego_Plan9MountPolicy(t *testing.T) {
+	gc := generateConstraints(testRand, maxContainersInGeneratedConstraints, maxExternalProcessesInGeneratedConstraints)
+
+	tc, err := setupPlan9MountTest(gc)
+	if err != nil {
+		t.Fatalf("unable to setup test: %v", err)
+	}
+
+	err = tc.policy.EnforcePlan9MountPolicy(tc.uvmPathForShare)
+	if err != nil {
+		t.Fatalf("Policy enforcement unexpectedly was denied: %v", err)
+	}
+
+	err = tc.policy.EnforceCreateContainerPolicy(
+		tc.sandboxID,
+		tc.containerID,
+		tc.argList,
+		tc.envList,
+		tc.workingDir,
+		tc.mounts)
+
+	if err != nil {
+		t.Fatalf("Policy enforcement unexpectedly was denied: %v", err)
+	}
+}
+
+func Test_Rego_Plan9MountPolicy_No_Matches(t *testing.T) {
+	gc := generateConstraints(testRand, maxContainersInGeneratedConstraints, maxExternalProcessesInGeneratedConstraints)
+
+	tc, err := setupPlan9MountTest(gc)
+	if err != nil {
+		t.Fatalf("unable to setup test: %v", err)
+	}
+
+	mount := generateUVMPathForShare(testRand, tc.containerID)
+	for {
+		if mount != tc.uvmPathForShare {
+			break
+		}
+		mount = generateUVMPathForShare(testRand, tc.containerID)
+	}
+
+	err = tc.policy.EnforcePlan9MountPolicy(mount)
+	if err != nil {
+		t.Fatalf("Policy enforcement unexpectedly was denied: %v", err)
+	}
+
+	err = tc.policy.EnforceCreateContainerPolicy(
+		tc.sandboxID,
+		tc.containerID,
+		tc.argList,
+		tc.envList,
+		tc.workingDir,
+		tc.mounts)
+
+	if err == nil {
+		t.Fatal("Policy enforcement unexpectedly was allowed")
+	}
+}
+
+func Test_Rego_Plan9MountPolicy_Invalid(t *testing.T) {
+	gc := generateConstraints(testRand, maxContainersInGeneratedConstraints, maxExternalProcessesInGeneratedConstraints)
+
+	tc, err := setupPlan9MountTest(gc)
+	if err != nil {
+		t.Fatalf("unable to setup test: %v", err)
+	}
+
+	mount := randString(testRand, maxGeneratedMountSourceLength)
+	err = tc.policy.EnforcePlan9MountPolicy(mount)
+	if err == nil {
+		t.Fatal("Policy enforcement unexpectedly was allowed", err)
+	}
+}
+
+func Test_Rego_Plan9UnmountPolicy(t *testing.T) {
+	gc := generateConstraints(testRand, maxContainersInGeneratedConstraints, maxExternalProcessesInGeneratedConstraints)
+
+	tc, err := setupPlan9MountTest(gc)
+	if err != nil {
+		t.Fatalf("unable to setup test: %v", err)
+	}
+
+	err = tc.policy.EnforcePlan9MountPolicy(tc.uvmPathForShare)
+	if err != nil {
+		t.Fatalf("Couldn't mount as part of setup: %v", err)
+	}
+
+	err = tc.policy.EnforcePlan9UnmountPolicy(tc.uvmPathForShare)
+	if err != nil {
+		t.Fatalf("Policy enforcement unexpectedly was denied: %v", err)
+	}
+
+	err = tc.policy.EnforceCreateContainerPolicy(
+		tc.sandboxID,
+		tc.containerID,
+		tc.argList,
+		tc.envList,
+		tc.workingDir,
+		tc.mounts)
+
+	if err == nil {
+		t.Fatal("Policy enforcement unexpectedly was allowed")
+	}
+}
+
+func Test_Rego_Plan9UnmountPolicy_No_Matches(t *testing.T) {
+	gc := generateConstraints(testRand, maxContainersInGeneratedConstraints, maxExternalProcessesInGeneratedConstraints)
+
+	tc, err := setupPlan9MountTest(gc)
+	if err != nil {
+		t.Fatalf("unable to setup test: %v", err)
+	}
+
+	mount := generateUVMPathForShare(testRand, tc.containerID)
+	err = tc.policy.EnforcePlan9MountPolicy(mount)
+	if err != nil {
+		t.Fatalf("Couldn't mount as part of setup: %v", err)
+	}
+
+	badMount := randString(testRand, maxPlan9MountTargetLength)
+	err = tc.policy.EnforcePlan9UnmountPolicy(badMount)
+	if err == nil {
+		t.Fatalf("Policy enforcement unexpectedly was allowed")
+	}
+}
+
+func Test_Rego_GetPropertiesPolicy_On(t *testing.T) {
+	f := func(constraints *generatedConstraints) bool {
+		tc, err := setupGetPropertiesTest(constraints, true)
+		if err != nil {
+			t.Error(err)
+			return false
+		}
+
+		err = tc.policy.EnforceGetPropertiesPolicy()
+		if err != nil {
+			t.Error("Policy enforcement unexpectedly was denied")
+			return false
+		}
+
+		return true
+	}
+
+	if err := quick.Check(f, &quick.Config{MaxCount: 50}); err != nil {
+		t.Errorf("Test_Rego_GetPropertiesPolicy_On: %v", err)
+	}
+}
+
+func Test_Rego_GetPropertiesPolicy_Off(t *testing.T) {
+	f := func(constraints *generatedConstraints) bool {
+		tc, err := setupGetPropertiesTest(constraints, false)
+		if err != nil {
+			t.Error(err)
+			return false
+		}
+
+		err = tc.policy.EnforceGetPropertiesPolicy()
+		if err == nil {
+			t.Error("Policy enforcement unexpectedly was allowed")
+			return false
+		}
+
+		return true
+	}
+
+	if err := quick.Check(f, &quick.Config{MaxCount: 50}); err != nil {
+		t.Errorf("Test_Rego_GetPropertiesPolicy_Off: %v", err)
+	}
+}
+
+func Test_Rego_DumpStacksPolicy_On(t *testing.T) {
+	f := func(constraints *generatedConstraints) bool {
+		tc, err := setupDumpStacksTest(constraints, true)
+		if err != nil {
+			t.Error(err)
+			return false
+		}
+
+		err = tc.policy.EnforceDumpStacksPolicy()
+		if err != nil {
+			t.Errorf("Policy enforcement unexpectedly was denied: %v", err)
+			return false
+		}
+
+		return true
+	}
+
+	if err := quick.Check(f, &quick.Config{MaxCount: 50}); err != nil {
+		t.Errorf("Test_Rego_DumpStacksPolicy_On: %v", err)
+	}
+}
+
+func Test_Rego_DumpStacksPolicy_Off(t *testing.T) {
+	f := func(constraints *generatedConstraints) bool {
+		tc, err := setupDumpStacksTest(constraints, false)
+		if err != nil {
+			t.Error(err)
+			return false
+		}
+
+		err = tc.policy.EnforceDumpStacksPolicy()
+		if err == nil {
+			t.Error("Policy enforcement unexpectedly was allowed")
+			return false
+		}
+
+		return true
+	}
+
+	if err := quick.Check(f, &quick.Config{MaxCount: 50}); err != nil {
+		t.Errorf("Test_Rego_DumpStacksPolicy_Off: %v", err)
+	}
+}
+
 //
 // Setup and "fixtures" follow...
 //
@@ -1684,6 +1962,8 @@ func (constraints *generatedConstraints) toPolicy() *securityPolicyInternal {
 	securityPolicy := new(securityPolicyInternal)
 	securityPolicy.Containers = constraints.containers
 	securityPolicy.ExternalProcesses = constraints.externalProcesses
+	securityPolicy.AllowPropertiesAccess = constraints.allowGetProperties
+	securityPolicy.AllowDumpStacks = constraints.allowDumpStacks
 	return securityPolicy
 }
 
@@ -1937,6 +2217,118 @@ type regoExternalPolicyTestConfig struct {
 	policy *regoEnforcer
 }
 
+func setupPlan9MountTest(gc *generatedConstraints) (tc *regoPlan9MountTestConfig, err error) {
+	securityPolicy := gc.toPolicy()
+	defaultMounts := generateMounts(testRand)
+	privilegedMounts := generateMounts(testRand)
+
+	testContainer := selectContainerFromConstraints(gc, testRand)
+	mountIndex := atMost(testRand, int32(len(testContainer.Mounts)-1))
+	testMount := &testContainer.Mounts[mountIndex]
+	testMount.Source = plan9Prefix
+	testMount.Type = "secret"
+
+	policy, err := newRegoPolicy(securityPolicy.marshalRego(),
+		toOCIMounts(defaultMounts),
+		toOCIMounts(privilegedMounts))
+	if err != nil {
+		return nil, err
+	}
+
+	containerID, err := mountImageForContainer(policy, testContainer)
+	if err != nil {
+		return nil, err
+	}
+
+	uvmPathForShare := generateUVMPathForShare(testRand, containerID)
+
+	envList := buildEnvironmentVariablesFromEnvRules(testContainer.EnvRules, testRand)
+	sandboxID := testDataGenerator.uniqueSandboxID()
+
+	mounts := testContainer.Mounts
+	mounts = append(mounts, defaultMounts...)
+
+	if testContainer.AllowElevated {
+		mounts = append(mounts, privilegedMounts...)
+	}
+	mountSpec := buildMountSpecFromMountArray(mounts, sandboxID, testRand)
+	mountSpec.Mounts = append(mountSpec.Mounts, oci.Mount{
+		Source:      uvmPathForShare,
+		Destination: testMount.Destination,
+		Options:     testMount.Options,
+		Type:        testMount.Type,
+	})
+
+	// see NOTE_TESTCOPY
+	return &regoPlan9MountTestConfig{
+		envList:         copyStrings(envList),
+		argList:         copyStrings(testContainer.Command),
+		workingDir:      testContainer.WorkingDir,
+		containerID:     containerID,
+		sandboxID:       sandboxID,
+		mounts:          copyMounts(mountSpec.Mounts),
+		uvmPathForShare: uvmPathForShare,
+		policy:          policy,
+	}, nil
+}
+
+type regoPlan9MountTestConfig struct {
+	envList         []string
+	argList         []string
+	workingDir      string
+	containerID     string
+	sandboxID       string
+	mounts          []oci.Mount
+	uvmPathForShare string
+	policy          *regoEnforcer
+}
+
+func setupGetPropertiesTest(gc *generatedConstraints, allowPropertiesAccess bool) (tc *regoGetPropertiesTestConfig, err error) {
+	gc.allowGetProperties = allowPropertiesAccess
+
+	securityPolicy := gc.toPolicy()
+	defaultMounts := generateMounts(testRand)
+	privilegedMounts := generateMounts(testRand)
+
+	policy, err := newRegoPolicy(securityPolicy.marshalRego(),
+		toOCIMounts(defaultMounts),
+		toOCIMounts(privilegedMounts))
+	if err != nil {
+		return nil, err
+	}
+
+	return &regoGetPropertiesTestConfig{
+		policy: policy,
+	}, nil
+}
+
+type regoGetPropertiesTestConfig struct {
+	policy *regoEnforcer
+}
+
+func setupDumpStacksTest(constraints *generatedConstraints, allowDumpStacks bool) (tc *regoGetPropertiesTestConfig, err error) {
+	constraints.allowDumpStacks = allowDumpStacks
+
+	securityPolicy := constraints.toPolicy()
+	defaultMounts := generateMounts(testRand)
+	privilegedMounts := generateMounts(testRand)
+
+	policy, err := newRegoPolicy(securityPolicy.marshalRego(),
+		toOCIMounts(defaultMounts),
+		toOCIMounts(privilegedMounts))
+	if err != nil {
+		return nil, err
+	}
+
+	return &regoGetPropertiesTestConfig{
+		policy: policy,
+	}, nil
+}
+
+type regoDumpStacksTestConfig struct {
+	policy *regoEnforcer
+}
+
 func mountImageForContainer(policy *regoEnforcer, container *securityPolicyContainer) (string, error) {
 	containerID := testDataGenerator.uniqueContainerID()
 
@@ -1946,7 +2338,7 @@ func mountImageForContainer(policy *regoEnforcer, container *securityPolicyConta
 	}
 
 	// see NOTE_TESTCOPY
-	err = policy.EnforceOverlayMountPolicy(containerID, copyStrings(layerPaths))
+	err = policy.EnforceOverlayMountPolicy(containerID, copyStrings(layerPaths), testDataGenerator.uniqueMountTarget())
 	if err != nil {
 		return "", fmt.Errorf("error mounting filesystem: %w", err)
 	}
@@ -2100,4 +2492,11 @@ func randChoices(r *rand.Rand, numChoices int, numItems int, replacement bool) [
 	}
 
 	return choices
+}
+
+func generateUVMPathForShare(r *rand.Rand, containerID string) string {
+	return fmt.Sprintf("%s/%s%s",
+		guestpath.LCOWRootPrefixInUVM,
+		containerID,
+		fmt.Sprintf(guestpath.LCOWMountPathPrefixFmt, atMost(r, maxPlan9MountIndex)))
 }
