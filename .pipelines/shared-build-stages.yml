@@ -54,11 +54,14 @@ stages:
               go build -o $OUT_DIR github.com/Microsoft/hcsshim/cmd/device-util
               go build -o $OUT_DIR github.com/Microsoft/hcsshim/cmd/ncproxy
               go build -o $OUT_DIR github.com/Microsoft/hcsshim/cmd/jobobject-util
+              go build -o $OUT_DIR github.com/Microsoft/hcsshim/cmd/wclayer
               go build -o $OUT_DIR github.com/Microsoft/hcsshim/internal/tools/zapdir
               go build -o $OUT_DIR github.com/Microsoft/hcsshim/internal/tools/grantvmgroupaccess
+              go build -o $OUT_DIR github.com/Microsoft/hcsshim/internal/tools/uvmboot
 
               GOOS=linux go build -buildmode=pie -o $OUT_DIR github.com/Microsoft/hcsshim/cmd/tar2ext4
             env:
+              CGO_ENABLED: "0"
               GOPROXY: off
               GOFLAGS: -mod=vendor
               GOOS: windows
@@ -70,7 +73,7 @@ stages:
 
               go test -gcflags=all=-d=checkptr -c github.com/Microsoft/hcsshim/test/cri-containerd --tags functional
               go test -gcflags=all=-d=checkptr -tags=functional -c github.com/Microsoft/hcsshim/test/functional
-              GOOS=linux go test -gcflags=all=-d=checkptr -tags=functional -c github.com/Microsoft/hcsshim/test/gcs
+              GOOS=linux go test -gcflags=all=-d=checkptr -buildmode=pie -tags=functional -c github.com/Microsoft/hcsshim/test/gcs
               go build -o sample-logging-driver.exe cri-containerd/helpers/log.go
 
               mv ./cri-containerd.test.exe $OUT_DIR
@@ -78,6 +81,7 @@ stages:
               mv ./gcs.test $OUT_DIR
               mv ./sample-logging-driver.exe $OUT_DIR
             env:
+              CGO_ENABLED: "0"
               GOOS: windows
               OUT_DIR: '$(Build.StagingDirectory)/out'
               GOFLAGS: -mod=mod
