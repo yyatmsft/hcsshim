@@ -6,13 +6,14 @@ package hcsv2
 import (
 	"bufio"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -39,6 +40,7 @@ import (
 	"github.com/Microsoft/hcsshim/pkg/securitypolicy"
 	"github.com/mattn/go-shellwords"
 	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
 )
 
@@ -64,25 +66,32 @@ type Host struct {
 	securityPolicyEnforcer    securitypolicy.SecurityPolicyEnforcer
 	securityPolicyEnforcerSet bool
 	uvmReferenceInfo          string
+
+	// logging target
+	logWriter io.Writer
+	// hostMounts keeps the state of currently mounted devices and file systems,
+	// which is used for GCS hardening.
+	hostMounts *hostMounts
 }
 
-func NewHost(rtime runtime.Runtime, vsock transport.Transport) *Host {
+func NewHost(rtime runtime.Runtime, vsock transport.Transport, initialEnforcer securitypolicy.SecurityPolicyEnforcer, logWriter io.Writer) *Host {
 	return &Host{
 		containers:                make(map[string]*Container),
 		externalProcesses:         make(map[int]*externalProcess),
 		rtime:                     rtime,
 		vsock:                     vsock,
 		securityPolicyEnforcerSet: false,
-		securityPolicyEnforcer:    &securitypolicy.ClosedDoorSecurityPolicyEnforcer{},
+		securityPolicyEnforcer:    initialEnforcer,
+		logWriter:                 logWriter,
+		hostMounts:                newHostMounts(),
 	}
 }
 
 // SetConfidentialUVMOptions takes guestresource.LCOWConfidentialOptions
 // to set up our internal data structures we use to store and enforce
 // security policy. The options can contain security policy enforcer type,
-// encoded security policy, signed UVM reference information and a UVM path
-// of an arbitrary pod startup security policy fragment. The security policy
-// and uvm reference information can be further presented to workload
+// encoded security policy and signed UVM reference information The security
+// policy and uvm reference information can be further presented to workload
 // containers for validation and attestation purposes.
 func (h *Host) SetConfidentialUVMOptions(ctx context.Context, r *guestresource.LCOWConfidentialOptions) error {
 	h.policyMutex.Lock()
@@ -103,6 +112,18 @@ func (h *Host) SetConfidentialUVMOptions(ctx context.Context, r *guestresource.L
 		return err
 	}
 
+	// This is one of two points at which we might change our logging.
+	// At this time, we now have a policy and can determine what the policy
+	// author put as policy around runtime logging.
+	// The other point is on startup where we take a flag to set the default
+	// policy enforcer to use before a policy arrives. After that flag is set,
+	// we use the enforcer in question to set up logging as well.
+	if err = p.EnforceRuntimeLoggingPolicy(); err == nil {
+		logrus.SetOutput(h.logWriter)
+	} else {
+		logrus.SetOutput(io.Discard)
+	}
+
 	hostData, err := securitypolicy.NewSecurityPolicyDigest(r.EncodedSecurityPolicy)
 	if err != nil {
 		return err
@@ -115,19 +136,6 @@ func (h *Host) SetConfidentialUVMOptions(ctx context.Context, r *guestresource.L
 	h.securityPolicyEnforcer = p
 	h.securityPolicyEnforcerSet = true
 	h.uvmReferenceInfo = r.EncodedUVMReference
-
-	if r.PodStartupFragment != "" {
-		fragmentData, err := os.ReadFile(r.PodStartupFragment)
-		if err != nil {
-			return err
-		}
-
-		encodedFragment := base64.StdEncoding.EncodeToString(fragmentData)
-		// TODO (maksiman): Replace with internal fragment injection calls, when they're implemented
-		if err := h.InjectFragment(ctx, &guestresource.LCOWSecurityPolicyFragment{Fragment: encodedFragment}); err != nil {
-			return err
-		}
-	}
 
 	return nil
 }
@@ -307,7 +315,7 @@ func (h *Host) CreateContainer(ctx context.Context, id string, settings *prot.VM
 		}()
 	}
 
-	err = h.securityPolicyEnforcer.EnforceCreateContainerPolicy(
+	envToKeep, err := h.securityPolicyEnforcer.EnforceCreateContainerPolicy(
 		sandboxID,
 		id,
 		settings.OCISpecification.Process.Args,
@@ -317,6 +325,10 @@ func (h *Host) CreateContainer(ctx context.Context, id string, settings *prot.VM
 	)
 	if err != nil {
 		return nil, errors.Wrapf(err, "container creation denied due to policy")
+	}
+
+	if envToKeep != nil {
+		settings.OCISpecification.Process.Env = []string(envToKeep)
 	}
 
 	// Export security policy and signed UVM reference info as one of the
@@ -386,16 +398,56 @@ func (h *Host) CreateContainer(ctx context.Context, id string, settings *prot.VM
 	return c, nil
 }
 
-func (h *Host) modifyHostSettings(ctx context.Context, containerID string, req *guestrequest.ModificationRequest) error {
+func (h *Host) modifyHostSettings(ctx context.Context, containerID string, req *guestrequest.ModificationRequest) (err error) {
 	switch req.ResourceType {
 	case guestresource.ResourceTypeMappedVirtualDisk:
-		return modifyMappedVirtualDisk(ctx, req.RequestType, req.Settings.(*guestresource.LCOWMappedVirtualDisk), h.securityPolicyEnforcer)
+		mvd := req.Settings.(*guestresource.LCOWMappedVirtualDisk)
+		// find the actual controller number on the bus and update the incoming request.
+		cNum, err := scsi.ActualControllerNumber(ctx, mvd.Controller)
+		if err != nil {
+			return err
+		}
+		mvd.Controller = cNum
+		// first we try to update the internal state for read-write attachments.
+		if !mvd.ReadOnly {
+			localCtx, cancel := context.WithTimeout(ctx, time.Second*5)
+			defer cancel()
+			source, err := scsi.ControllerLunToName(localCtx, mvd.Controller, mvd.Lun)
+			if err != nil {
+				return err
+			}
+			if req.RequestType == guestrequest.RequestTypeAdd {
+				if err := h.hostMounts.AddRWDevice(mvd.MountPath, source, mvd.Encrypted); err != nil {
+					return err
+				}
+				defer func() {
+					if err != nil {
+						_ = h.hostMounts.RemoveRWDevice(mvd.MountPath, source)
+					}
+				}()
+			} else if req.RequestType == guestrequest.RequestTypeRemove {
+				if err := h.hostMounts.RemoveRWDevice(mvd.MountPath, source); err != nil {
+					return err
+				}
+				defer func() {
+					if err != nil {
+						_ = h.hostMounts.AddRWDevice(mvd.MountPath, source, mvd.Encrypted)
+					}
+				}()
+			}
+		}
+		return modifyMappedVirtualDisk(ctx, req.RequestType, mvd, h.securityPolicyEnforcer)
 	case guestresource.ResourceTypeMappedDirectory:
 		return modifyMappedDirectory(ctx, h.vsock, req.RequestType, req.Settings.(*guestresource.LCOWMappedDirectory), h.securityPolicyEnforcer)
 	case guestresource.ResourceTypeVPMemDevice:
 		return modifyMappedVPMemDevice(ctx, req.RequestType, req.Settings.(*guestresource.LCOWMappedVPMemDevice), h.securityPolicyEnforcer)
 	case guestresource.ResourceTypeCombinedLayers:
-		return modifyCombinedLayers(ctx, req.RequestType, req.Settings.(*guestresource.LCOWCombinedLayers), h.securityPolicyEnforcer)
+		cl := req.Settings.(*guestresource.LCOWCombinedLayers)
+		// when cl.ScratchPath == "", we mount overlay as read-only, in which case
+		// we don't really care about scratch encryption, since the host already
+		// knows about the layers and the overlayfs.
+		encryptedScratch := cl.ScratchPath != "" && h.hostMounts.IsEncrypted(cl.ScratchPath)
+		return modifyCombinedLayers(ctx, req.RequestType, req.Settings.(*guestresource.LCOWCombinedLayers), encryptedScratch, h.securityPolicyEnforcer)
 	case guestresource.ResourceTypeNetwork:
 		return modifyNetwork(ctx, req.RequestType, req.Settings.(*guestresource.LCOWNetworkAdapter))
 	case guestresource.ResourceTypeVPCIDevice:
@@ -419,7 +471,7 @@ func (h *Host) modifyHostSettings(ctx context.Context, containerID string, req *
 		}
 		return h.InjectFragment(ctx, r)
 	default:
-		return errors.Errorf("the ResourceType \"%s\" is not supported for UVM", req.ResourceType)
+		return errors.Errorf("the ResourceType %q is not supported for UVM", req.ResourceType)
 	}
 }
 
@@ -505,8 +557,9 @@ func (h *Host) SignalContainerProcess(ctx context.Context, containerID string, p
 func (h *Host) ExecProcess(ctx context.Context, containerID string, params prot.ProcessParameters, conSettings stdio.ConnectionSettings) (_ int, err error) {
 	var pid int
 	var c *Container
+	var envToKeep securitypolicy.EnvList
 	if params.IsExternal || containerID == UVMContainerID {
-		err = h.securityPolicyEnforcer.EnforceExecExternalProcessPolicy(
+		envToKeep, err = h.securityPolicyEnforcer.EnforceExecExternalProcessPolicy(
 			params.CommandArgs,
 			processParamEnvToOCIEnv(params.Environment),
 			params.WorkingDirectory,
@@ -514,6 +567,11 @@ func (h *Host) ExecProcess(ctx context.Context, containerID string, params prot.
 		if err != nil {
 			return pid, errors.Wrapf(err, "exec is denied due to policy")
 		}
+
+		if envToKeep != nil {
+			params.Environment = processOCIEnvToParam(envToKeep)
+		}
+
 		pid, err = h.runExternalProcess(ctx, params, conSettings)
 	} else if c, err = h.GetCreatedContainer(containerID); err == nil {
 		// We found a V2 container. Treat this as a V2 process.
@@ -524,9 +582,13 @@ func (h *Host) ExecProcess(ctx context.Context, containerID string, params prot.
 		} else {
 			// Windows uses a different field for command, there's no enforcement
 			// around this yet for Windows so this is Linux specific at the moment.
-			err = h.securityPolicyEnforcer.EnforceExecInContainerPolicy(containerID, params.OCIProcess.Args, params.OCIProcess.Env, params.OCIProcess.Cwd)
+			envToKeep, err = h.securityPolicyEnforcer.EnforceExecInContainerPolicy(containerID, params.OCIProcess.Args, params.OCIProcess.Env, params.OCIProcess.Cwd)
 			if err != nil {
 				return pid, errors.Wrapf(err, "exec in container denied due to policy")
+			}
+
+			if envToKeep != nil {
+				params.OCIProcess.Env = envToKeep
 			}
 
 			pid, err = c.ExecProcess(ctx, params.OCIProcess, conSettings)
@@ -717,14 +779,13 @@ func modifyMappedVirtualDisk(
 		return nil
 	case guestrequest.RequestTypeRemove:
 		if mvd.MountPath != "" {
-			err = securityPolicy.EnforceDeviceUnmountPolicy(mvd.MountPath)
-			if err != nil {
-				return errors.Wrapf(err, "unmounting scsi device at %s denied by policy", mvd.MountPath)
+			if mvd.ReadOnly {
+				if err := securityPolicy.EnforceDeviceUnmountPolicy(mvd.MountPath); err != nil {
+					return fmt.Errorf("unmounting scsi device at %s denied by policy: %w", mvd.MountPath, err)
+				}
 			}
 
-			if err := scsi.Unmount(ctx, mvd.Controller, mvd.Lun, mvd.MountPath,
-				mvd.Encrypted, mvd.VerityInfo, securityPolicy,
-			); err != nil {
+			if err := scsi.Unmount(ctx, mvd.Controller, mvd.Lun, mvd.MountPath, mvd.Encrypted, mvd.VerityInfo); err != nil {
 				return err
 			}
 		}
@@ -802,6 +863,7 @@ func modifyCombinedLayers(
 	ctx context.Context,
 	rt guestrequest.RequestType,
 	cl *guestresource.LCOWCombinedLayers,
+	scratchEncrypted bool,
 	securityPolicy securitypolicy.SecurityPolicyEnforcer,
 ) (err error) {
 	switch rt {
@@ -820,14 +882,17 @@ func modifyCombinedLayers(
 		} else {
 			upperdirPath = filepath.Join(cl.ScratchPath, "upper")
 			workdirPath = filepath.Join(cl.ScratchPath, "work")
+
+			if err := securityPolicy.EnforceScratchMountPolicy(cl.ScratchPath, scratchEncrypted); err != nil {
+				return fmt.Errorf("scratch mounting denied by policy: %w", err)
+			}
 		}
 
 		if err := securityPolicy.EnforceOverlayMountPolicy(cl.ContainerID, layerPaths, cl.ContainerRootPath); err != nil {
-			return errors.Wrap(err, "overlay creation denied by policy")
+			return fmt.Errorf("overlay creation denied by policy: %w", err)
 		}
 
-		return overlay.MountLayer(ctx, layerPaths, upperdirPath, workdirPath,
-			cl.ContainerRootPath, readonly, cl.ContainerID)
+		return overlay.MountLayer(ctx, layerPaths, upperdirPath, workdirPath, cl.ContainerRootPath, readonly)
 	case guestrequest.RequestTypeRemove:
 		if err := securityPolicy.EnforceOverlayUnmountPolicy(cl.ContainerRootPath); err != nil {
 			return errors.Wrap(err, "overlay removal denied by policy")
@@ -883,4 +948,15 @@ func processParamEnvToOCIEnv(environment map[string]string) []string {
 		environmentList = append(environmentList, fmt.Sprintf("%s=%s", k, v))
 	}
 	return environmentList
+}
+
+// processOCIEnvToParam is the inverse of processParamEnvToOCIEnv
+func processOCIEnvToParam(envs []string) map[string]string {
+	paramEnv := make(map[string]string, len(envs))
+	for _, env := range envs {
+		parts := strings.SplitN(env, "=", 2)
+		paramEnv[parts[0]] = parts[1]
+	}
+
+	return paramEnv
 }
