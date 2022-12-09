@@ -55,4 +55,3 @@ extends:
     squash_merge_pr: ${{ parameters.squash_merge_pr }}
     auto_complete: ${{ parameters.auto_complete }}
     delete_merge_branch: ${{ parameters.delete_merge_branch }}
-    trace_level: 0
