@@ -3,6 +3,8 @@ package framework
 import future.keywords.every
 import future.keywords.in
 
+svn := "@@FRAMEWORK_SVN@@"
+
 device_mounted(target) {
     data.metadata.devices[target]
 }
@@ -25,23 +27,25 @@ deviceHash_ok {
 
 default mount_device := {"allowed": false}
 
-mount_device := {"devices": devices, "allowed": true} {
+mount_device := {"metadata": [addDevice], "allowed": true} {
     not device_mounted(input.target)
     deviceHash_ok
-    devices := {
+    addDevice := {
+        "name": "devices",
         "action": "add",
         "key": input.target,
-        "value": input.deviceHash
+        "value": input.deviceHash,
     }
 }
 
 default unmount_device := {"allowed": false}
 
-unmount_device := {"devices": devices, "allowed": true} {
+unmount_device := {"metadata": [removeDevice], "allowed": true} {
     device_mounted(input.unmountTarget)
-    devices := {
+    removeDevice := {
+        "name": "devices",
         "action": "remove",
-        "key": input.unmountTarget
+        "key": input.unmountTarget,
     }
 }
 
@@ -63,44 +67,68 @@ overlay_mounted(target) {
     data.metadata.overlayTargets[target]
 }
 
+default candidate_containers := []
+
+candidate_containers := containers {
+    semver.compare(data.policy.framework_svn, svn) == 0    
+
+    policy_containers := [c | c := data.policy.containers[_]]
+    fragment_containers := [c |
+        feed := data.metadata.issuers[_].feeds[_]
+        fragment := feed[_]
+        c := fragment.containers[_]
+    ]
+
+    containers := array.concat(policy_containers, fragment_containers)
+}
+
+candidate_containers := containers {
+    semver.compare(data.policy.framework_svn, svn) < 0
+
+    policy_containers := apply_defaults("container", data.policy.containers, data.policy.framework_svn)
+    fragment_containers := [c |
+        feed := data.metadata.issuers[_].feeds[_]
+        fragment := feed[_]
+        c := fragment.containers[_]
+    ]
+
+    containers := array.concat(policy_containers, fragment_containers)  
+}
+
 default mount_overlay := {"allowed": false}
 
-mount_overlay := {"matches": matches, "overlayTargets": overlay_targets, "allowed": true} {
+mount_overlay := {"metadata": [addMatches, addOverlayTarget], "allowed": true} {
     not overlay_exists
-    # we need to assemble a list of all possible containers
-    # which match the overlay requested, including both
-    # containers in the policy and those included from fragments.
-    policy_containers := [container |
-        container := data.policy.containers[_]
+
+    containers := [container |
+        container := candidate_containers[_]
         layerPaths_ok(container.layers)
     ]
-    fragment_containers := [container |
-        feed := data.metadata.issuers[_].feeds[_]
-        some fragment in feed
-        container := fragment.containers[_]
-        layerPaths_ok(container.layers)
-    ]
-    containers := array.concat(policy_containers, fragment_containers)
+
     count(containers) > 0
-    matches := {
+    addMatches := {
+        "name": "matches",
         "action": "add",
         "key": input.containerID,
-        "value": containers
+        "value": containers,
     }
-    overlay_targets := {
+
+    addOverlayTarget := {
+        "name": "overlayTargets",
         "action": "add",
         "key": input.target,
-        "value": true
+        "value": true,
     }
 }
 
 default unmount_overlay := {"allowed": false}
 
-unmount_overlay := {"overlayTargets": overlay_targets, "allowed": true} {
+unmount_overlay := {"metadata": [removeOverlayTarget], "allowed": true} {
     overlay_mounted(input.unmountTarget)
-    overlay_targets := {
+    removeOverlayTarget := {
+        "name": "overlayTargets",
         "action": "remove",
-        "key": input.unmountTarget
+        "key": input.unmountTarget,
     }
 }
 
@@ -185,12 +213,22 @@ valid_envs_for_all(items) := envs {
 
 valid_envs_for_all(items) := envs {
     not data.policy.allow_environment_variable_dropping
+
     # no dropping allowed, so we just return the input
     envs := input.envList
 }
 
 workingDirectory_ok(working_dir) {
     input.workingDir == working_dir
+}
+
+privileged_ok(elevation_allowed) {
+    not input.privileged
+}
+
+privileged_ok(elevation_allowed) {
+    input.privileged
+    input.privileged == elevation_allowed
 }
 
 default container_started := false
@@ -201,16 +239,17 @@ container_started {
 
 default create_container := {"allowed": false}
 
-create_container := {"matches": matches,
+create_container := {"metadata": [updateMatches, addStarted],
                      "env_list": env_list,
                      "allow_stdio_access": allow_stdio_access,
-                     "started": started,
                      "allowed": true} {
     not container_started
+
     # narrow the matches based upon command, working directory, and
     # mount list
     possible_containers := [container |
         container := data.metadata.matches[input.containerID][_]
+        privileged_ok(container.allow_elevated)
         workingDirectory_ok(container.working_dir)
         command_ok(container.command)
         mountList_ok(container.mounts, container.allow_elevated)
@@ -237,15 +276,18 @@ create_container := {"matches": matches,
         c.allow_stdio_access == allow_stdio_access
     }
 
-    matches := {
+    updateMatches := {
+        "name": "matches",
         "action": "update",
         "key": input.containerID,
-        "value": containers
+        "value": containers,
     }
-    started := {
+
+    addStarted := {
+        "name": "started",
         "action": "add",
         "key": input.containerID,
-        "value": true
+        "value": true,
     }
 }
 
@@ -317,10 +359,11 @@ mountList_ok(mounts, allow_elevated) {
 
 default exec_in_container := {"allowed": false}
 
-exec_in_container := {"matches": matches,
+exec_in_container := {"metadata": [updateMatches],
                       "env_list": env_list,
                       "allowed": true} {
     container_started
+
     # narrow our matches based upon the process requested
     possible_containers := [container |
         container := data.metadata.matches[input.containerID][_]
@@ -340,19 +383,20 @@ exec_in_container := {"matches": matches,
     ]
 
     count(containers) > 0
-
-    matches := {
+    updateMatches := {
+        "name": "matches",
         "action": "update",
         "key": input.containerID,
-        "value": containers
+        "value": containers,
     }
 }
 
 default shutdown_container := {"allowed": false}
 
-shutdown_container := {"started": remove, "matches": remove, "allowed": true} {
+shutdown_container := {"started": remove, "metadata": [remove], "allowed": true} {
     container_started
     remove := {
+        "name": "matches",
         "action": "remove",
         "key": input.containerID,
     }
@@ -360,22 +404,24 @@ shutdown_container := {"started": remove, "matches": remove, "allowed": true} {
 
 default signal_container_process := {"allowed": false}
 
-signal_container_process := {"matches": matches, "allowed": true} {
+signal_container_process := {"metadata": [updateMatches], "allowed": true} {
     container_started
     input.isInitProcess
     containers := [container |
         container := data.metadata.matches[input.containerID][_]
         signal_ok(container.signals)
     ]
+
     count(containers) > 0
-    matches := {
+    updateMatches := {
+        "name": "matches",
         "action": "update",
         "key": input.containerID,
-        "value": containers
+        "value": containers,
     }
 }
 
-signal_container_process := {"matches": matches, "allowed": true} {
+signal_container_process := {"metadata": [updateMatches], "allowed": true} {
     container_started
     not input.isInitProcess
     containers := [container |
@@ -384,11 +430,13 @@ signal_container_process := {"matches": matches, "allowed": true} {
         command_ok(process.command)
         signal_ok(process.signals)
     ]
+
     count(containers) > 0
-    matches := {
+    updateMatches := {
+        "name": "matches",
         "action": "update",
         "key": input.containerID,
-        "value": containers
+        "value": containers,
     }
 }
 
@@ -403,41 +451,71 @@ plan9_mounted(target) {
 
 default plan9_mount := {"allowed": false}
 
-plan9_mount := {"p9mounts": p9mounts, "allowed": true} {
+plan9_mount := {"metadata": [addPlan9Target], "allowed": true} {
     not plan9_mounted(input.target)
     some containerID, _ in data.metadata.matches
     pattern := concat("", [input.rootPrefix, "/", containerID, input.mountPathPrefix])
     regex.match(pattern, input.target)
-    p9mounts := {
+    addPlan9Target := {
+        "name": "p9mounts",
         "action": "add",
         "key": input.target,
-        "value": containerID
+        "value": containerID,
     }
 }
 
 default plan9_unmount := {"allowed": false}
 
-plan9_unmount := {"p9mounts": p9mounts, "allowed": true} {
+plan9_unmount := {"metadata": [removePlan9Target], "allowed": true} {
     plan9_mounted(input.unmountTarget)
-    p9mounts := {
+    removePlan9Target := {
+        "name": "p9mounts",
         "action": "remove",
         "key": input.unmountTarget,
     }
 }
 
 
-default enforcement_point_info := {"available": false, "allowed": false, "unknown": true, "invalid": false}
+default enforcement_point_info := {"available": false, "default_results": {"allow": false}, "unknown": true, "invalid": false}
 
-enforcement_point_info := {"available": available, "allowed": allowed, "unknown": false, "invalid": false} {
+enforcement_point_info := {"available": available, "default_results": default_results, "unknown": false, "invalid": false} {
     enforcement_point := data.api.enforcement_points[input.name]
     semver.compare(data.api.svn, enforcement_point.introducedVersion) >= 0
     available := semver.compare(data.policy.api_svn, enforcement_point.introducedVersion) >= 0
-    allowed := enforcement_point.allowedByDefault
+    default_results := enforcement_point.default_results
 }
 
-enforcement_point_info := {"available": false, "allowed": false, "unknown": false, "invalid": true} {
+enforcement_point_info := {"available": false, "default_results": {"allow": false}, "unknown": false, "invalid": true} {
     enforcement_point := data.api.enforcement_points[input.name]
     semver.compare(data.api.svn, enforcement_point.introducedVersion) < 0
+}
+
+default candidate_external_processes := []
+
+candidate_external_processes := external_processes {
+    semver.compare(data.policy.framework_svn, svn) == 0    
+
+    policy_external_processes := [e | e := data.policy.external_processes[_]]
+    fragment_external_processes := [e |
+        feed := data.metadata.issuers[_].feeds[_]
+        fragment := feed[_]
+        e := fragment.external_processes[_]
+    ]
+
+    external_processes := array.concat(policy_external_processes, fragment_external_processes)
+}
+
+candidate_external_processes := external_processes {
+    semver.compare(data.policy.framework_svn, svn) < 0
+
+    policy_external_processes := apply_defaults("external_process", data.policy.external_processes, data.policy.framework_svn)
+    fragment_external_processes := [e |
+        feed := data.metadata.issuers[_].feeds[_]
+        fragment := feed[_]
+        e := fragment.external_processes[_]
+    ]
+
+    external_processes := array.concat(policy_external_processes, fragment_external_processes)  
 }
 
 external_process_ok(process) {
@@ -451,24 +529,15 @@ default exec_external := {"allowed": false}
 exec_external := {"allowed": true,
                   "allow_stdio_access": allow_stdio_access,
                   "env_list": env_list} {
-    # we need to assemble a list of all possible external processes which
-    # have a matching working directory and command
-    policy_processes := [process |
-        some process in data.policy.external_processes
+    print(count(candidate_external_processes))
+
+    possible_processes := [process |
+        process := candidate_external_processes[_]
         workingDirectory_ok(process.working_dir)
         command_ok(process.command)
     ]
 
-    fragment_processes := [process |
-        feed := data.metadata.issuers[_].feeds[_]
-        some fragment in feed
-        some process in fragment.external_processes
-        workingDirectory_ok(process.working_dir)
-        command_ok(process.command)
-    ]
-
-    possible_processes := array.concat(policy_processes, fragment_processes)
-
+    print(count(possible_processes))
     # check to see if the environment variables match, dropping
     # them if allowed (and necessary)
     env_list := valid_envs_for_all(possible_processes)
@@ -504,19 +573,44 @@ runtime_logging := {"allowed": true} {
 }
 
 default fragment_containers := []
+
 fragment_containers := data[input.namespace].containers
 
 default fragment_fragments := []
+
 fragment_fragments := data[input.namespace].fragments
 
 default fragment_external_processes := []
+
 fragment_external_processes := data[input.namespace].external_processes
 
+apply_defaults(name, raw_values, framework_svn) := values {
+    semver.compare(framework_svn, svn) == 0
+    values := raw_values
+}
+
+apply_defaults(name, raw_values, framework_svn) := values {
+    semver.compare(framework_svn, svn) < 0
+    template := load_defaults(name, framework_svn)
+    print(template)
+    values := [updated | 
+        raw := raw_values[_]
+        flat := object.union(template, raw)
+        arrays := {key: values |            
+            template[key]["__array__"]
+            item_template := template[key]["item"]
+            values := [object.union(item_template, raw) | raw := raw[key][_]]
+        }
+        updated := object.union(flat, arrays)
+    ]
+}
+
 extract_fragment_includes(includes) := fragment {
+    framework_svn := data[input.namespace].framework_svn
     objects := {
-        "containers": fragment_containers,
-        "fragments": fragment_fragments,
-        "external_processes": fragment_external_processes
+        "containers": apply_defaults("container", fragment_containers, framework_svn),
+        "fragments": apply_defaults("fragment", fragment_fragments, framework_svn),
+        "external_processes": apply_defaults("external_process", fragment_external_processes, framework_svn)
     }
 
     fragment := {
@@ -536,50 +630,50 @@ update_issuer(includes) := issuer {
     feed_exists(input.issuer, input.feed)
     old_issuer := data.metadata.issuers[input.issuer]
     old_fragments := old_issuer.feeds[input.feed]
-    new_issuer := {
-        "feeds": {
-            input.feed: array.concat([extract_fragment_includes(includes)], old_fragments)
-        }
-    }
+    new_issuer := {"feeds": {input.feed: array.concat([extract_fragment_includes(includes)], old_fragments)}}
+
     issuer := object.union(old_issuer, new_issuer)
 }
 
 update_issuer(includes) := issuer {
     not feed_exists(input.issuer, input.feed)
     old_issuer := data.metadata.issuers[input.issuer]
-    new_issuer := {
-        "feeds": {
-            input.feed: [extract_fragment_includes(includes)]
-        }
-    }
+    new_issuer := {"feeds": {input.feed: [extract_fragment_includes(includes)]}}
+
     issuer := object.union(old_issuer, new_issuer)
 }
 
 update_issuer(includes) := issuer {
     not issuer_exists(input.issuer)
-    issuer := {
-        "feeds": {
-            input.feed: [extract_fragment_includes(includes)]
-        }
-    }
+    issuer := {"feeds": {input.feed: [extract_fragment_includes(includes)]}}
 }
 
-default scratch_mount := {"allowed": false}
+default candidate_fragments := []
 
-scratch_mounted(target) {
-    data.metadata.scratch_mounts[target]
+candidate_fragments := fragments {
+    semver.compare(data.policy.framework_svn, svn) == 0    
+    
+    policy_fragmemnts := [f | f := data.policy.fragments[_]]
+    fragment_fragments := [f |
+        feed := data.metadata.issuers[_].feeds[_]
+        fragment := feed[_]
+        f := fragment.fragments[_]
+    ]
+
+    fragments := array.concat(policy_fragmemnts, fragment_fragments)
 }
 
-scratch_mount := {"scratch_mounts": scratch_mounts, "allowed": true} {
-    not scratch_mounted(input.target)
-    data.policy.allow_unencrypted_scratch
-    scratch_mounts := {
-        "action": "add",
-        "key": input.target,
-        "value": {
-            "encrypted": input.encrypted,
-        }
-    }
+candidate_fragments := fragments {
+    semver.compare(data.policy.framework_svn, svn) < 0
+
+    policy_fragments := apply_defaults("fragment", data.policy.fragments, data.policy.framework_svn)
+    fragment_fragments := [f |
+        feed := data.metadata.issuers[_].feeds[_]
+        fragment := feed[_]
+        f := fragment.fragments[_]
+    ]
+
+    fragments := array.concat(policy_fragments, fragment_fragments)  
 }
 
 default load_fragment := {"allowed": false}
@@ -590,54 +684,94 @@ fragment_ok(fragment) {
     semver.compare(data[input.namespace].svn, fragment.minimum_svn) >= 0
 }
 
-
-# test if there is a matching fragment in the policy
-matching_fragment := fragment {
-    some fragment in data.policy.fragments
+load_fragment := {"metadata": [updateIssuer], "add_module": add_module, "allowed": true} {
+    some fragment in candidate_fragments
     fragment_ok(fragment)
-}
 
-# test if there is a matching fragment in a fragment
-matching_fragment := subfragment {
-    feed := data.metadata.issuers[_].feeds[_]
-    some fragment in feed
-    some subfragment in fragment.fragments
-    fragment_ok(subfragment)
-}
-
-load_fragment := {"issuers": issuers, "add_module": add_module, "allowed": true} {
-    fragment := matching_fragment
     issuer := update_issuer(fragment.includes)
-    issuers := {
+    updateIssuer := {
+        "name": "issuers",
         "action": "update",
         "key": input.issuer,
-        "value": issuer
+        "value": issuer,
     }
 
     add_module := "namespace" in fragment.includes
 }
 
-scratch_mount := {"scratch_mounts": scratch_mounts, "allowed": true} {
+default scratch_mount := {"allowed": false}
+
+scratch_mounted(target) {
+    data.metadata.scratch_mounts[target]
+}
+
+scratch_mount := {"metadata": [add_scratch_mount], "allowed": true} {
+    not scratch_mounted(input.target)
+    data.policy.allow_unencrypted_scratch
+    add_scratch_mount := {
+        "name": "scratch_mounts",
+        "action": "add",
+        "key": input.target,
+        "value": {"encrypted": input.encrypted},
+    }
+}
+
+scratch_mount := {"metadata": [add_scratch_mount], "allowed": true} {
     not scratch_mounted(input.target)
     not data.policy.allow_unencrypted_scratch
     input.encrypted
-    scratch_mounts := {
+    add_scratch_mount := {
+        "name": "scratch_mounts",
         "action": "add",
         "key": input.target,
-        "value": {
-            "encrypted": input.encrypted,
-        }
+        "value": {"encrypted": input.encrypted},
     }
 }
 
 default scratch_unmount := {"allowed": false}
 
-scratch_unmount := {"scratch_mounts": scratch_mounts, "allowed": true} {
+scratch_unmount := {"metadata": [remove_scratch_mount], "allowed": true} {
     scratch_mounted(input.unmountTarget)
-    scratch_mounts := {
+    remove_scratch_mount := {
+        "name": "scratch_mounts",
         "action": "remove",
-        "key": input.unmountTarget
+        "key": input.unmountTarget,
     }
+}
+
+object_default(info, svn) := value {
+    not info["item"]
+    semver.compare(svn, info.introduced_version) >= 0
+    value := null
+}
+
+object_default(info, svn) := value {
+    not info["item"]
+    semver.compare(svn, info.introduced_version) < 0
+    value := info.default_value
+}
+
+item_default(info, svn) := value {
+    semver.compare(svn, info.introduced_version) >= 0
+    value := null    
+}
+
+item_default(info, svn) := value {
+    semver.compare(svn, info.introduced_version) < 0
+    value := info.default_value
+}
+
+object_default(info, svn) := value {
+    info["item"]
+    value := {
+        "__array__": true,
+        "item": {key: value | value := item_default(info["item"][key], svn)}
+    }
+}
+
+load_defaults(name, svn) := defaults {
+    version_info := data.objectDefaults[name]
+    defaults := {key: value | value := object_default(version_info[key], svn)}
 }
 
 # error messages
@@ -696,6 +830,19 @@ errors["no matching containers for overlay"] {
     not overlay_matches
 }
 
+default privileged_matches := false
+
+privileged_matches {
+    input.rule == "create_container"
+    some container in data.metadata.matches[input.containerID]
+    privileged_ok(container.allow_elevated)
+}
+
+errors["privileged escalation not allowed"] {
+    input.rule in ["create_container"]
+    not privileged_matches
+}
+
 default command_matches := false
 
 command_matches {
@@ -740,7 +887,9 @@ errors[envError] {
     input.rule in ["create_container", "exec_in_container", "exec_external"]
     bad_envs := [env |
         env := input.envList[_]
-        not env_matches(env)]
+        not env_matches(env)
+    ]
+
     count(bad_envs) > 0
     envError := concat(" ", ["invalid env list:", concat(",", bad_envs)])
 }
@@ -773,7 +922,9 @@ errors[mountError] {
     input.rule == "create_container"
     bad_mounts := [mount.destination |
         mount := input.mounts[_]
-        not mount_matches(mount)]
+        not mount_matches(mount)
+    ]
+
     count(bad_mounts) > 0
     mountError := concat(" ", ["invalid mount list:", concat(",", bad_mounts)])
 }
@@ -875,4 +1026,24 @@ errors["unencrypted scratch not allowed"] {
 errors["no scratch at path to unmount"] {
     input.rule == "scratch_unmount"
     not scratch_mounted(input.unmountTarget)
+}
+
+errors[framework_svn_error] {
+    not data.policy.framework_svn
+    framework_svn_error := concat(" ", ["framework_svn is missing. Current svn:", svn])
+}
+
+errors[framework_svn_error] {
+    semver.compare(data.policy.framework_svn, svn) > 0
+    framework_svn_error := concat(" ", ["framework_svn is ahead of the current svn:", data.policy.framework_svn, ">", svn])
+}
+
+errors[fragment_framework_svn_error] {
+    not data[input.namespace].framework_svn   
+    fragment_framework_svn_error := concat(" ", ["fragment framework_svn is missing. Current svn:", svn])     
+}
+
+errors[fragment_framework_svn_error] {
+    semver.compare(data[input.namespace].framework_svn, svn) > 0
+    fragment_framework_svn_error := concat(" ", ["fragment framework_svn is ahead of the current svn:", data[input.namespace].framework_svn, ">", svn])
 }
