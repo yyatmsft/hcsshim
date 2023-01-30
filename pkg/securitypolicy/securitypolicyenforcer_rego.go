@@ -4,28 +4,19 @@
 package securitypolicy
 
 import (
-	"bytes"
-	"context"
 	_ "embed"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 
 	"github.com/Microsoft/hcsshim/internal/guest/spec"
 	"github.com/Microsoft/hcsshim/internal/guestpath"
-	"github.com/Microsoft/hcsshim/internal/log"
-	"github.com/open-policy-agent/opa/ast"
-	"github.com/open-policy-agent/opa/rego"
-	"github.com/open-policy-agent/opa/storage/inmem"
-	"github.com/open-policy-agent/opa/topdown"
+	rpi "github.com/Microsoft/hcsshim/internal/regopolicyinterpreter"
 	oci "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/pkg/errors"
-	"github.com/sirupsen/logrus"
 )
 
 const regoEnforcerName = "rego"
@@ -41,20 +32,7 @@ func init() {
 	defaultMarshaller = regoMarshaller
 }
 
-//go:embed framework.rego
-var frameworkCode string
-
-//go:embed api.rego
-var apiCode string
-
 const plan9Prefix = "plan9://"
-
-type module struct {
-	namespace string
-	feed      string
-	issuer    string
-	code      string
-}
 
 // RegoEnforcer is a stub implementation of a security policy, which will be
 // based on [Rego] policy language. The detailed implementation will be
@@ -62,20 +40,12 @@ type module struct {
 //
 // [Rego]: https://www.openpolicyagent.org/docs/latest/policy-language/
 type regoEnforcer struct {
-	// Rego which describes policy behavior (see above)
-	code string
-	// Mutex to prevent concurrent access to fields
-	mutex sync.Mutex
-	// Rego data object, used to store policy state
-	data map[string]interface{}
 	// Base64 encoded (JSON) policy
 	base64policy string
-	// Modules
-	modules map[string]*module
-	// Compiled modules
-	compiledModules *ast.Compiler
-	// Debug flag
-	debug bool
+	// Rego interpreter
+	rego *rpi.RegoPolicyInterpreter
+	// Default mount data
+	defaultMounts []oci.Mount
 	// Stdio allowed state on a per container id basis
 	stdio map[string]bool
 }
@@ -122,9 +92,6 @@ func (a stringSet) intersect(b stringSet) stringSet {
 	return s
 }
 
-type policyResults map[string]interface{}
-type metadataObject map[string]interface{}
-type metadataStore map[string]metadataObject
 type inputData map[string]interface{}
 
 func createRegoEnforcer(base64EncodedPolicy string,
@@ -185,31 +152,44 @@ func createRegoEnforcer(base64EncodedPolicy string,
 	return regoPolicy, nil
 }
 
-func newRegoPolicy(code string, defaultMounts []oci.Mount, privilegedMounts []oci.Mount) (*regoEnforcer, error) {
-	policy := new(regoEnforcer)
-	policy.code = code
+func (policy *regoEnforcer) enableLogging(path string, logLevel rpi.LogLevel) {
+	policy.rego.EnableLogging(path, logLevel)
+}
+
+func newRegoPolicy(code string, defaultMounts []oci.Mount, privilegedMounts []oci.Mount) (policy *regoEnforcer, err error) {
+	policy = new(regoEnforcer)
+
+	policy.defaultMounts = make([]oci.Mount, len(defaultMounts))
+	copy(policy.defaultMounts, defaultMounts)
+
+	objectDefaults := make(map[string]interface{})
+	err = json.Unmarshal([]byte(FrameworkObjects), &objectDefaults)
+	if err != nil {
+		return nil, fmt.Errorf("unable to unmarshal framework object defaults: %w", err)
+	}
 
 	defaultMountData := make([]interface{}, 0, len(defaultMounts))
 	privilegedMountData := make([]interface{}, 0, len(privilegedMounts))
-	policy.data = map[string]interface{}{
-		// for more information on metadata, see the `updateMetadata` method
-		"metadata":         make(metadataStore),
+	data := map[string]interface{}{
+		"objectDefaults":   objectDefaults,
 		"defaultMounts":    appendMountData(defaultMountData, defaultMounts),
 		"privilegedMounts": appendMountData(privilegedMountData, privilegedMounts),
 		"sandboxPrefix":    guestpath.SandboxMountPrefix,
 		"hugePagesPrefix":  guestpath.HugePagesMountPrefix,
 		"plan9Prefix":      plan9Prefix,
 	}
-	policy.base64policy = ""
-	policy.debug = false
-	policy.modules = map[string]*module{
-		"policy.rego":    {namespace: "policy", code: policy.code},
-		"api.rego":       {namespace: "api", code: apiCode},
-		"framework.rego": {namespace: "framework", code: frameworkCode},
+
+	policy.rego, err = rpi.NewRegoPolicyInterpreter(code, data)
+	if err != nil {
+		return nil, err
 	}
 	policy.stdio = map[string]bool{}
 
-	err := policy.compile()
+	policy.base64policy = ""
+	policy.rego.AddModule("framework.rego", &rpi.RegoModule{Namespace: "framework", Code: FrameworkCode})
+	policy.rego.AddModule("api.rego", &rpi.RegoModule{Namespace: "api", Code: APICode})
+
+	err = policy.rego.Compile()
 	if err != nil {
 		return nil, fmt.Errorf("rego compilation failed: %w", err)
 	}
@@ -217,393 +197,94 @@ func newRegoPolicy(code string, defaultMounts []oci.Mount, privilegedMounts []oc
 	return policy, nil
 }
 
-func (policy *regoEnforcer) compile() error {
-	if policy.compiledModules != nil {
-		return nil
+func (policy *regoEnforcer) applyDefaults(enforcementPoint string, results rpi.RegoQueryResult) (rpi.RegoQueryResult, error) {
+	deny := rpi.RegoQueryResult{"allowed": false}
+	info, err := policy.queryEnforcementPoint(enforcementPoint)
+	if err != nil {
+		return deny, err
 	}
 
-	modules := make(map[string]string)
-	for _, module := range policy.modules {
-		modules[module.namespace+".rego"] = module.code
+	if results.IsEmpty() && info.availableByPolicyVersion {
+		// policy should define this rule but it is missing
+		return deny, fmt.Errorf("rule for %s is missing from policy", enforcementPoint)
 	}
 
-	// TODO temporary hack for debugging policies until GCS logging design
-	// and implementation is finalized. This option should be changed to
-	// "true" if debugging is desired.
-	options := ast.CompileOpts{
-		EnablePrintStatements: policy.debug,
-	}
-
-	if compiled, err := ast.CompileModulesWithOpt(modules, options); err == nil {
-		policy.compiledModules = compiled
-		return nil
-	} else {
-		return fmt.Errorf("rego compilation failed: %w", err)
-	}
-}
-
-func (policy *regoEnforcer) allowed(enforcementPoint string, results policyResults) (bool, error) {
-	if len(results) == 0 {
-		info, err := policy.queryEnforcementPoint(enforcementPoint)
-		if err != nil {
-			return false, err
-		}
-
-		if info.availableByPolicyVersion {
-			// policy should define this rule but it is missing
-			return false, fmt.Errorf("rule for %s is missing from policy", enforcementPoint)
-		} else {
-			// rule added after policy was authored
-			return info.allowedByDefault, nil
-		}
-	}
-
-	if allowed, ok := results["allowed"].(bool); ok {
-		return allowed, nil
-	} else {
-		return false, fmt.Errorf("unable to load 'allowed' from object returned by policy for %s", enforcementPoint)
-	}
+	return info.defaultResults.Union(results), nil
 }
 
 type enforcementPointInfo struct {
 	availableByPolicyVersion bool
-	allowedByDefault         bool
+	defaultResults           rpi.RegoQueryResult
 }
 
 func (policy *regoEnforcer) queryEnforcementPoint(enforcementPoint string) (*enforcementPointInfo, error) {
-	input := inputData{"name": enforcementPoint}
-	input["rule"] = enforcementPoint
-	query := rego.New(
-		rego.Query("data.framework.enforcement_point_info"),
-		rego.Input(input),
-		rego.Compiler(policy.compiledModules))
+	input := inputData{
+		"name": enforcementPoint,
+		"rule": enforcementPoint,
+	}
+	result, err := policy.rego.Query("data.framework.enforcement_point_info", input)
 
-	ctx := context.Background()
-	resultSet, err := query.Eval(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("error querying enforcement point information: %w", err)
+	}
+
+	unknown, err := result.Bool("unknown")
 	if err != nil {
 		return nil, err
 	}
 
-	results, ok := resultSet[0].Expressions[0].Value.(map[string]interface{})
-	if !ok {
-		return nil, errors.New("unable to load results object from Rego query")
-	}
-
-	if results["unknown"].(bool) {
+	if unknown {
 		return nil, fmt.Errorf("enforcement point rule %s does not exist", enforcementPoint)
 	}
 
-	if results["invalid"].(bool) {
+	invalid, err := result.Bool("invalid")
+	if err != nil {
+		return nil, err
+	}
+
+	if invalid {
 		return nil, fmt.Errorf("enforcement point rule %s is invalid", enforcementPoint)
 	}
 
+	defaultResults, err := result.Object("default_results")
+	if err != nil {
+		return nil, errors.New("enforcement point result missing defaults")
+	}
+
+	availableByPolicyVersion, err := result.Bool("available")
+	if err != nil {
+		return nil, errors.New("enforcement point result missing availability info")
+	}
+
 	return &enforcementPointInfo{
-		availableByPolicyVersion: results["available"].(bool),
-		allowedByDefault:         results["allowed"].(bool),
+		availableByPolicyVersion: availableByPolicyVersion,
+		defaultResults:           defaultResults,
 	}, nil
 }
 
-func (policy *regoEnforcer) query(enforcementPoint string, input inputData) (policyResults, error) {
-	store := inmem.NewFromObject(policy.data)
-
-	input["name"] = enforcementPoint
-	var buf bytes.Buffer
-	query := rego.New(
-		rego.Query(fmt.Sprintf("data.policy.%s", enforcementPoint)),
-		rego.Input(input),
-		rego.Store(store),
-		rego.EnablePrintStatements(policy.debug),
-		rego.PrintHook(topdown.NewPrintHook(&buf)))
-
-	if policy.compiledModules == nil {
-		for _, module := range policy.modules {
-			rego.Module(module.namespace, module.code)(query)
-		}
-	} else {
-		rego.Compiler(policy.compiledModules)(query)
-	}
-
-	ctx := context.Background()
-	resultSet, err := query.Eval(ctx)
-	if err != nil {
-		log.G(ctx).WithError(err).WithFields(logrus.Fields{
-			"Policy": policy.code,
-		}).Error("Rego policy execution error")
-		return nil, err
-	}
-
-	output := buf.String()
-	if len(output) > 0 {
-		log.G(ctx).WithFields(logrus.Fields{
-			"output": output,
-		}).Debug("Rego policy output")
-	}
-
-	if len(resultSet) == 0 {
-		return make(policyResults), nil
-	}
-
-	results, ok := resultSet[0].Expressions[0].Value.(map[string]interface{})
-	if !ok {
-		return nil, errors.New("unable to load results object from Rego query")
-	}
-	return policyResults(results), nil
-}
-
-/**
-Each rule can optionally return a series of metadata commands in addition to
-`allowed` which will then be made available in the `data.metadata` namespace
-for use by the policy in future rule evaluations. A metadata command has the
-following format:
-
-``` json
-{
-    "<name>": {
-        "action": "<add|update|remove>",
-        "key": "<key>",
-        "value": "<optional value>"
-    }
-}
-```
-
-Metadata objects can be any Rego object, *i.e.* arbitrary JSON. Importantly,
-the Go code does not need to understand what they are or what they contain, just
-place them in the specified point in the hierarchy such that the policy can find
-them in later rule evaluations. To give a sense of how this works, here are a
-sequence of rule results and the resulting metadata state:
-
-**Initial State**
-``` json
-{
-    "metadata": {}
-}
-```
-
-**Result 1**
-``` json
-{
-    "allowed": true,
-    "devices": {
-        "action": "add",
-        "key": "/dev/layer0",
-        "value": "5c5d1ae1aff5e1f36d5300de46592efe4ccb7889e60a4b82bbaf003c2248f2a7"
-    }
-}
-```
-
-**State 1**
-``` json
-{
-    "metadata": {
-        "devices": {
-            "/dev/layer0": "5c5d1ae1aff5e1f36d5300de46592efe4ccb7889e60a4b82bbaf003c2248f2a7"
-        }
-    }
-}
-```
-
-**Result 2**
-``` json
-{
-    "allowed": true,
-    "matches": {
-        "action": "add",
-        "key": "container1",
-        "value": [{<container>}, {<container>}, {<container>}]
-    }
-}
-```
-
-**State 2**
-``` json
-{
-    "metadata": {
-        "devices": {
-            "/dev/layer0": "5c5d1ae1aff5e1f36d5300de46592efe4ccb7889e60a4b82bbaf003c2248f2a7"
-        },
-        "matches": {
-            "container1": [{<container>}, {<container>}, {<container>}]
-        }
-    }
-}
-```
-
-**Result 3**
-``` json
-{
-    "allowed": true,
-    "matches": {
-        "action": "update",
-        "key": "container1",
-        "value": [{<container>}]
-    }
-}
-```
-
-**State 3**
-``` json
-{
-    "metadata": {
-        "devices": {
-            "/dev/layer0": "5c5d1ae1aff5e1f36d5300de46592efe4ccb7889e60a4b82bbaf003c2248f2a7"
-        },
-        "matches": {
-            "container1": [{<container>}]
-        }
-    }
-}
-```
-
-**Result 4**
-``` json
-{
-    "allowed": true,
-    "devices": {
-        "action": "remove",
-        "key": "/dev/layer0"
-    }
-}
-```
-
-**State 4**
-``` json
-{
-    "metadata": {
-        "devices": {},
-        "matches": {
-            "container1": [{<container>}]
-        }
-    }
-}
-```
-*/
-
-type metadataAction string
-
-const (
-	Add    metadataAction = "add"
-	Update metadataAction = "update"
-	Remove metadataAction = "remove"
-)
-
-type metadataOperation struct {
-	action metadataAction
-	key    string
-	value  interface{}
-}
-
-func newMetadataOperation(operation interface{}) (*metadataOperation, error) {
-	data, ok := operation.(map[string]interface{})
-	if !ok {
-		return nil, errors.New("unable to load metadata object")
-	}
-	action, ok := data["action"].(string)
-	if !ok {
-		return nil, errors.New("unable to load metadata action")
-	}
-
-	var metadataOp metadataOperation
-	metadataOp.action = metadataAction(action)
-	metadataOp.key, ok = data["key"].(string)
-	if !ok {
-		return nil, errors.New("unable to load metadata key")
-	}
-
-	if metadataOp.action != Remove {
-		metadataOp.value, ok = data["value"]
-		if !ok {
-			return nil, errors.New("unable to load metadata value")
-		}
-	}
-
-	return &metadataOp, nil
-}
-
-var reservedResultKeys = map[string]struct{}{
-	"allowed":            {},
-	"add_module":         {},
-	"env_list":           {},
-	"allow_stdio_access": {},
-}
-
-func (policy *regoEnforcer) getMetadata(name string) (metadataObject, error) {
-	metadata := policy.data["metadata"].(metadataStore)
-	if store, ok := metadata[name]; ok {
-		return store, nil
-	}
-
-	return nil, fmt.Errorf("unable to retrieve metadata store for %s", name)
-}
-
-func (policy *regoEnforcer) updateMetadata(results policyResults) error {
-	policy.mutex.Lock()
-	defer policy.mutex.Unlock()
-
-	// this is the top-level data namespace for metadata
-	metadata := policy.data["metadata"].(metadataStore)
-	for name, value := range results {
-		if _, ok := reservedResultKeys[name]; ok {
-			continue
-		}
-
-		if _, ok := metadata[name]; !ok {
-			// this adds the metadata object if it does not already exist
-			metadata[name] = make(metadataObject)
-		}
-
-		op, err := newMetadataOperation(value)
-		if err != nil {
-			return err
-		}
-
-		switch op.action {
-		case Add:
-			_, ok := metadata[name][op.key]
-			if ok {
-				return fmt.Errorf("cannot add metadata value, key %s[%s] already exists", name, op.key)
-			}
-
-			metadata[name][op.key] = op.value
-			break
-
-		case Update:
-			metadata[name][op.key] = op.value
-			break
-
-		case Remove:
-			delete(metadata[name], op.key)
-			break
-
-		default:
-			return fmt.Errorf("unrecognized metadata action: %s", op.action)
-		}
-	}
-
-	return nil
-}
-
-func (policy *regoEnforcer) enforce(enforcementPoint string, input inputData) (policyResults, error) {
-	results, err := policy.query(enforcementPoint, input)
+func (policy *regoEnforcer) enforce(enforcementPoint string, input inputData) (rpi.RegoQueryResult, error) {
+	rule := "data.policy." + enforcementPoint
+	result, err := policy.rego.Query(rule, input)
 	if err != nil {
 		return nil, err
 	}
 
-	allowed, err := policy.allowed(enforcementPoint, results)
+	result, err = policy.applyDefaults(enforcementPoint, result)
+	if err != nil {
+		return result, err
+	}
+
+	allowed, err := result.Bool("allowed")
 	if err != nil {
 		return nil, err
 	}
 
-	if allowed {
-		err = policy.updateMetadata(results)
-	} else {
+	if !allowed {
 		err = policy.getReasonNotAllowed(enforcementPoint, input)
-	}
-
-	if err != nil {
 		return nil, err
 	}
 
-	return results, nil
+	return result, nil
 }
 
 func errorString(errors interface{}) string {
@@ -618,20 +299,19 @@ func errorString(errors interface{}) string {
 func (policy *regoEnforcer) getReasonNotAllowed(enforcementPoint string, input inputData) error {
 	inputJSON, err := json.Marshal(input)
 	if err != nil {
-		return fmt.Errorf("unable to marshal the Rego input data: %w", err)
+		return fmt.Errorf("%s not allowed by policy. Input unavailable due to marshalling error", enforcementPoint)
 	}
 
 	input["rule"] = enforcementPoint
-	results, err := policy.query("reason", input)
-	if err != nil {
-		return fmt.Errorf("%s not allowed by policy.\nInput: %s", enforcementPoint, string(inputJSON))
+	result, err := policy.rego.Query("data.policy.reason", input)
+	if err == nil {
+		errors, _ := result.Value("errors")
+		if errors != nil {
+			return fmt.Errorf("%s not allowed by policy. Errors: %v.\nInput: %s", enforcementPoint, errors, string(inputJSON))
+		}
 	}
 
-	if errors, ok := results["errors"]; ok {
-		return fmt.Errorf("%s not allowed by policy. Errors: %v.\nInput: %s", enforcementPoint, errorString(errors), string(inputJSON))
-	} else {
-		return fmt.Errorf("%s not allowed by policy.\nInput: %s", enforcementPoint, string(inputJSON))
-	}
+	return fmt.Errorf("%s not allowed by policy.\nInput: %s", enforcementPoint, string(inputJSON))
 }
 
 func (policy *regoEnforcer) EnforceDeviceMountPolicy(target string, deviceHash string) error {
@@ -664,19 +344,9 @@ func (policy *regoEnforcer) EnforceOverlayUnmountPolicy(target string) error {
 	return err
 }
 
-// Rego does not have a way to determine the OS path separator
-// so we append it via these methods.
-func sandboxMountsDir(sandboxID string) string {
-	return fmt.Sprintf("%s%c", spec.SandboxMountsDir(sandboxID), os.PathSeparator)
-}
-
-func hugePagesMountsDir(sandboxID string) string {
-	return fmt.Sprintf("%s%c", spec.HugePagesMountsDir(sandboxID), os.PathSeparator)
-}
-
-func getEnvsToKeep(envList []string, results policyResults) ([]string, error) {
-	value, ok := results["env_list"]
-	if !ok {
+func getEnvsToKeep(envList []string, results rpi.RegoQueryResult) ([]string, error) {
+	value, err := results.Value("env_list")
+	if err != nil || value == nil {
 		// policy did not return an 'env_list'. This is interpreted
 		// as "proceed with provided env list".
 		return envList, nil
@@ -708,15 +378,17 @@ func (policy *regoEnforcer) EnforceCreateContainerPolicy(
 	envList []string,
 	workingDir string,
 	mounts []oci.Mount,
+	privileged bool,
 ) (toKeep EnvList, stdioAccessAllowed bool, err error) {
 	input := inputData{
 		"containerID":  containerID,
 		"argList":      argList,
 		"envList":      envList,
 		"workingDir":   workingDir,
-		"sandboxDir":   sandboxMountsDir(sandboxID),
-		"hugePagesDir": hugePagesMountsDir(sandboxID),
+		"sandboxDir":   spec.SandboxMountsDir(sandboxID),
+		"hugePagesDir": spec.HugePagesMountsDir(sandboxID),
 		"mounts":       appendMountData([]interface{}{}, mounts),
+		"privileged":   privileged,
 	}
 
 	results, err := policy.enforce("create_container", input)
@@ -729,19 +401,9 @@ func (policy *regoEnforcer) EnforceCreateContainerPolicy(
 		return nil, false, err
 	}
 
-	if value, ok := results["allow_stdio_access"]; ok {
-		if value, ok := value.(bool); ok {
-			stdioAccessAllowed = value
-		} else {
-			// we got a non-boolean. that's a clear error
-			// alert that we got an error rather than setting a default value
-			return nil, false, errors.New("`allow_stdio_access` needs to be a boolean")
-		}
-	} else {
-		// Policy writer didn't specify an `allow_studio_access` value.
-		// We have two options, return an error or set a default value.
-		// We are setting a default value: do not allow
-		stdioAccessAllowed = false
+	stdioAccessAllowed, err = results.Bool("allow_stdio_access")
+	if err != nil {
+		return nil, false, err
 	}
 
 	// Store the result of stdio access allowed for this container so we can use
@@ -775,12 +437,9 @@ func appendMountData(mountData []interface{}, mounts []oci.Mount) []interface{} 
 }
 
 func (policy *regoEnforcer) ExtendDefaultMounts(mounts []oci.Mount) error {
-	policy.mutex.Lock()
-	defer policy.mutex.Unlock()
-
-	defaultMounts := policy.data["defaultMounts"].([]interface{})
-	policy.data["defaultMounts"] = appendMountData(defaultMounts, mounts)
-	return nil
+	policy.defaultMounts = append(policy.defaultMounts, mounts...)
+	defaultMounts := appendMountData([]interface{}{}, policy.defaultMounts)
+	return policy.rego.UpdateData("defaultMounts", defaultMounts)
 }
 
 func (policy *regoEnforcer) EncodedSecurityPolicy() string {
@@ -825,19 +484,9 @@ func (policy *regoEnforcer) EnforceExecExternalProcessPolicy(argList []string, e
 		return nil, false, err
 	}
 
-	if value, ok := results["allow_stdio_access"]; ok {
-		if value, ok := value.(bool); ok {
-			stdioAccessAllowed = value
-		} else {
-			// we got a non-boolean. that's a clear error
-			// alert that we got an error rather than setting a default value
-			return nil, false, errors.New("`allow_stdio_access` needs to be a boolean")
-		}
-	} else {
-		// Policy writer didn't specify an `allow_studio_access` value.
-		// We have two options, return an error or set a default value.
-		// We are setting a default value: do not allow
-		stdioAccessAllowed = false
+	stdioAccessAllowed, err = results.Bool("allow_stdio_access")
+	if err != nil {
+		return nil, false, err
 	}
 
 	return toKeep, stdioAccessAllowed, nil
@@ -905,14 +554,6 @@ func (policy *regoEnforcer) EnforceRuntimeLoggingPolicy() error {
 	return err
 }
 
-func moduleID(issuer string, feed string) string {
-	return fmt.Sprintf("%s>%s", issuer, feed)
-}
-
-func (f module) id() string {
-	return moduleID(f.issuer, f.feed)
-}
-
 func parseNamespace(rego string) (string, error) {
 	lines := strings.Split(rego, "\n")
 	parts := strings.Split(lines[0], " ")
@@ -920,8 +561,7 @@ func parseNamespace(rego string) (string, error) {
 		return "", errors.New("package definition required on first line")
 	}
 
-	namespace := parts[1]
-	return namespace, nil
+	return strings.TrimSpace(parts[1]), nil
 }
 
 func (policy *regoEnforcer) LoadFragment(issuer string, feed string, rego string) error {
@@ -930,15 +570,14 @@ func (policy *regoEnforcer) LoadFragment(issuer string, feed string, rego string
 		return fmt.Errorf("unable to load fragment: %w", err)
 	}
 
-	fragment := &module{
-		issuer:    issuer,
-		feed:      feed,
-		code:      rego,
-		namespace: namespace,
+	fragment := &rpi.RegoModule{
+		Issuer:    issuer,
+		Feed:      feed,
+		Code:      rego,
+		Namespace: namespace,
 	}
 
-	policy.modules[fragment.id()] = fragment
-	policy.compiledModules = nil
+	policy.rego.AddModule(fragment.ID(), fragment)
 
 	input := inputData{
 		"issuer":    issuer,
@@ -948,17 +587,9 @@ func (policy *regoEnforcer) LoadFragment(issuer string, feed string, rego string
 
 	results, err := policy.enforce("load_fragment", input)
 
-	removeModule := true
-	if err == nil {
-		if addModule, ok := results["add_module"].(bool); ok {
-			if addModule {
-				removeModule = false
-			}
-		}
-	}
-
-	if removeModule {
-		delete(policy.modules, fragment.id())
+	addModule, _ := results.Bool("add_module")
+	if !addModule {
+		policy.rego.RemoveModule(fragment.ID())
 	}
 
 	return err

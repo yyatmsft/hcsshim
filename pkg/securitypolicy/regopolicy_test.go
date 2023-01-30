@@ -17,8 +17,8 @@ import (
 	"testing/quick"
 
 	"github.com/Microsoft/hcsshim/internal/guestpath"
+	rpi "github.com/Microsoft/hcsshim/internal/regopolicyinterpreter"
 	"github.com/blang/semver/v4"
-	"github.com/open-policy-agent/opa/ast"
 	"github.com/open-policy-agent/opa/rego"
 	oci "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/pkg/errors"
@@ -42,7 +42,7 @@ const (
 func Test_RegoTemplates(t *testing.T) {
 	query := rego.New(
 		rego.Query("data.api"),
-		rego.Module("api.rego", apiCode))
+		rego.Module("api.rego", APICode))
 
 	ctx := context.Background()
 	resultSet, err := query.Eval(ctx)
@@ -54,12 +54,16 @@ func Test_RegoTemplates(t *testing.T) {
 	apiSVN := apiRules["svn"].(string)
 	enforcementPoints := apiRules["enforcement_points"].(map[string]interface{})
 
-	err = verifyPolicyRules(apiSVN, enforcementPoints, policyRegoTemplate)
+	policyCode := strings.Replace(policyRegoTemplate, "@@OBJECTS@@", "", 1)
+	policyCode = strings.Replace(policyCode, "@@API_SVN@@", apiSVN, 1)
+	policyCode = strings.Replace(policyCode, "@@FRAMEWORK_SVN@@", frameworkSVN, 1)
+
+	err = verifyPolicyRules(apiSVN, enforcementPoints, policyCode)
 	if err != nil {
 		t.Errorf("Policy Rego Template is invalid: %s", err)
 	}
 
-	err = verifyPolicyRules(apiSVN, enforcementPoints, openDoorRegoTemplate)
+	err = verifyPolicyRules(apiSVN, enforcementPoints, openDoorRego)
 	if err != nil {
 		t.Errorf("Open Door Rego Template is invalid: %s", err)
 	}
@@ -283,16 +287,19 @@ func Test_Rego_EnforceDeviceUmountPolicy_Removes_Device_Entries(t *testing.T) {
 
 		err = policy.EnforceDeviceMountPolicy(target, rootHash)
 		if err != nil {
+			t.Errorf("unable to mount device: %v", err)
 			return false
 		}
 
 		err = policy.EnforceDeviceUnmountPolicy(target)
 		if err != nil {
+			t.Errorf("unable to unmount device: %v", err)
 			return false
 		}
 
 		err = policy.EnforceDeviceMountPolicy(target, rootHash)
 		if err != nil {
+			t.Errorf("unable to remount device: %v", err)
 			return false
 		}
 
@@ -682,7 +689,7 @@ func Test_Rego_EnforceCommandPolicy_NoMatches(t *testing.T) {
 			return false
 		}
 
-		_, _, err = tc.policy.EnforceCreateContainerPolicy(tc.sandboxID, tc.containerID, generateCommand(testRand), tc.envList, tc.workingDir, tc.mounts)
+		_, _, err = tc.policy.EnforceCreateContainerPolicy(tc.sandboxID, tc.containerID, generateCommand(testRand), tc.envList, tc.workingDir, tc.mounts, false)
 
 		if err == nil {
 			return false
@@ -714,7 +721,7 @@ func Test_Rego_EnforceEnvironmentVariablePolicy_Re2Match(t *testing.T) {
 		}
 
 		envList := append(tc.envList, "PREFIX_FOO=BAR")
-		_, _, err = tc.policy.EnforceCreateContainerPolicy(tc.sandboxID, tc.containerID, tc.argList, envList, tc.workingDir, tc.mounts)
+		_, _, err = tc.policy.EnforceCreateContainerPolicy(tc.sandboxID, tc.containerID, tc.argList, envList, tc.workingDir, tc.mounts, false)
 
 		// getting an error means something is broken
 		if err != nil {
@@ -739,7 +746,7 @@ func Test_Rego_EnforceEnvironmentVariablePolicy_NotAllMatches(t *testing.T) {
 		}
 
 		envList := append(tc.envList, generateNeverMatchingEnvironmentVariable(testRand))
-		_, _, err = tc.policy.EnforceCreateContainerPolicy(tc.sandboxID, tc.containerID, tc.argList, envList, tc.workingDir, tc.mounts)
+		_, _, err = tc.policy.EnforceCreateContainerPolicy(tc.sandboxID, tc.containerID, tc.argList, envList, tc.workingDir, tc.mounts, false)
 
 		// not getting an error means something is broken
 		if err == nil {
@@ -774,7 +781,7 @@ func Test_Rego_EnforceEnvironmentVariablePolicy_DropEnvs(t *testing.T) {
 		extraEnvs := buildEnvironmentVariablesFromEnvRules(extraRules, testRand)
 
 		envList := append(tc.envList, extraEnvs...)
-		actual, _, err := tc.policy.EnforceCreateContainerPolicy(tc.sandboxID, tc.containerID, tc.argList, envList, tc.workingDir, tc.mounts)
+		actual, _, err := tc.policy.EnforceCreateContainerPolicy(tc.sandboxID, tc.containerID, tc.argList, envList, tc.workingDir, tc.mounts, false)
 
 		// getting an error means something is broken
 		if err != nil {
@@ -805,7 +812,7 @@ func Test_Rego_EnforceEnvironmentVariablePolicy_DropEnvs_Multiple(t *testing.T) 
 	extraEnvs := buildEnvironmentVariablesFromEnvRules(extraRules, testRand)
 
 	envList := append(tc.envList, extraEnvs...)
-	actual, _, err := tc.policy.EnforceCreateContainerPolicy(tc.sandboxID, tc.containerID, tc.argList, envList, tc.workingDir, tc.mounts)
+	actual, _, err := tc.policy.EnforceCreateContainerPolicy(tc.sandboxID, tc.containerID, tc.argList, envList, tc.workingDir, tc.mounts, false)
 
 	// getting an error means something is broken
 	if err != nil {
@@ -827,7 +834,7 @@ func Test_Rego_EnforceEnvironmentVariablePolicy_DropEnvs_Multiple_NoMatch(t *tes
 	extraEnvs := buildEnvironmentVariablesFromEnvRules(extraRules, testRand)
 
 	envList := append(tc.envList, extraEnvs...)
-	actual, _, err := tc.policy.EnforceCreateContainerPolicy(tc.sandboxID, tc.containerID, tc.argList, envList, tc.workingDir, tc.mounts)
+	actual, _, err := tc.policy.EnforceCreateContainerPolicy(tc.sandboxID, tc.containerID, tc.argList, envList, tc.workingDir, tc.mounts, false)
 
 	// not getting an error means something is broken
 	if err == nil {
@@ -847,7 +854,7 @@ func Test_Rego_WorkingDirectoryPolicy_NoMatches(t *testing.T) {
 			return false
 		}
 
-		_, _, err = tc.policy.EnforceCreateContainerPolicy(tc.sandboxID, tc.containerID, tc.argList, tc.envList, randString(testRand, 20), tc.mounts)
+		_, _, err = tc.policy.EnforceCreateContainerPolicy(tc.sandboxID, tc.containerID, tc.argList, tc.envList, randString(testRand, 20), tc.mounts, false)
 		// not getting an error means something is broken
 		if err == nil {
 			return false
@@ -869,7 +876,7 @@ func Test_Rego_EnforceCreateContainer(t *testing.T) {
 			return false
 		}
 
-		_, _, err = tc.policy.EnforceCreateContainerPolicy(tc.sandboxID, tc.containerID, tc.argList, tc.envList, tc.workingDir, tc.mounts)
+		_, _, err = tc.policy.EnforceCreateContainerPolicy(tc.sandboxID, tc.containerID, tc.argList, tc.envList, tc.workingDir, tc.mounts, false)
 
 		// getting an error means something is broken
 		return err == nil
@@ -911,7 +918,7 @@ func Test_Rego_Enforce_CreateContainer_Start_All_Containers(t *testing.T) {
 			}
 			mountSpec := buildMountSpecFromMountArray(mounts, sandboxID, testRand)
 
-			_, _, err = policy.EnforceCreateContainerPolicy(sandboxID, containerID, container.Command, envList, container.WorkingDir, mountSpec.Mounts)
+			_, _, err = policy.EnforceCreateContainerPolicy(sandboxID, containerID, container.Command, envList, container.WorkingDir, mountSpec.Mounts, false)
 
 			// getting an error means something is broken
 			if err != nil {
@@ -938,7 +945,7 @@ func Test_Rego_EnforceCreateContainer_Invalid_ContainerID(t *testing.T) {
 		}
 
 		containerID := testDataGenerator.uniqueContainerID()
-		_, _, err = tc.policy.EnforceCreateContainerPolicy(tc.sandboxID, containerID, tc.argList, tc.envList, tc.workingDir, tc.mounts)
+		_, _, err = tc.policy.EnforceCreateContainerPolicy(tc.sandboxID, containerID, tc.argList, tc.envList, tc.workingDir, tc.mounts, false)
 
 		// not getting an error means something is broken
 		return err != nil
@@ -957,12 +964,12 @@ func Test_Rego_EnforceCreateContainer_Same_Container_Twice(t *testing.T) {
 			return false
 		}
 
-		_, _, err = tc.policy.EnforceCreateContainerPolicy(tc.sandboxID, tc.containerID, tc.argList, tc.envList, tc.workingDir, tc.mounts)
+		_, _, err = tc.policy.EnforceCreateContainerPolicy(tc.sandboxID, tc.containerID, tc.argList, tc.envList, tc.workingDir, tc.mounts, false)
 		if err != nil {
 			t.Error("Unable to start valid container.")
 			return false
 		}
-		_, _, err = tc.policy.EnforceCreateContainerPolicy(tc.sandboxID, tc.containerID, tc.argList, tc.envList, tc.workingDir, tc.mounts)
+		_, _, err = tc.policy.EnforceCreateContainerPolicy(tc.sandboxID, tc.containerID, tc.argList, tc.envList, tc.workingDir, tc.mounts, false)
 		if err == nil {
 			t.Error("Able to start a container with already used id.")
 			return false
@@ -990,7 +997,7 @@ func Test_Rego_ExtendDefaultMounts(t *testing.T) {
 		additionalMounts := buildMountSpecFromMountArray(defaultMounts, tc.sandboxID, testRand)
 		tc.mounts = append(tc.mounts, additionalMounts.Mounts...)
 
-		_, _, err = tc.policy.EnforceCreateContainerPolicy(tc.sandboxID, tc.containerID, tc.argList, tc.envList, tc.workingDir, tc.mounts)
+		_, _, err = tc.policy.EnforceCreateContainerPolicy(tc.sandboxID, tc.containerID, tc.argList, tc.envList, tc.workingDir, tc.mounts, false)
 
 		if err != nil {
 			t.Error(err)
@@ -1017,7 +1024,7 @@ func Test_Rego_MountPolicy_NoMatches(t *testing.T) {
 		additionalMounts := buildMountSpecFromMountArray(invalidMounts, tc.sandboxID, testRand)
 		tc.mounts = append(tc.mounts, additionalMounts.Mounts...)
 
-		_, _, err = tc.policy.EnforceCreateContainerPolicy(tc.sandboxID, tc.containerID, tc.argList, tc.envList, tc.workingDir, tc.mounts)
+		_, _, err = tc.policy.EnforceCreateContainerPolicy(tc.sandboxID, tc.containerID, tc.argList, tc.envList, tc.workingDir, tc.mounts, false)
 
 		// not getting an error means something is broken
 		if err == nil {
@@ -1046,7 +1053,7 @@ func Test_Rego_MountPolicy_NotAllOptionsFromConstraints(t *testing.T) {
 		options := inputMounts[mindex].Options
 		inputMounts[mindex].Options = options[:len(options)-1]
 
-		_, _, err = tc.policy.EnforceCreateContainerPolicy(tc.sandboxID, tc.containerID, tc.argList, tc.envList, tc.workingDir, tc.mounts)
+		_, _, err = tc.policy.EnforceCreateContainerPolicy(tc.sandboxID, tc.containerID, tc.argList, tc.envList, tc.workingDir, tc.mounts, false)
 
 		// not getting an error means something is broken
 		if err == nil {
@@ -1072,7 +1079,7 @@ func Test_Rego_MountPolicy_BadSource(t *testing.T) {
 		index := randMinMax(testRand, 0, int32(len(tc.mounts)-1))
 		tc.mounts[index].Source = randString(testRand, maxGeneratedMountSourceLength)
 
-		_, _, err = tc.policy.EnforceCreateContainerPolicy(tc.sandboxID, tc.containerID, tc.argList, tc.envList, tc.workingDir, tc.mounts)
+		_, _, err = tc.policy.EnforceCreateContainerPolicy(tc.sandboxID, tc.containerID, tc.argList, tc.envList, tc.workingDir, tc.mounts, false)
 
 		// not getting an error means something is broken
 		if err == nil {
@@ -1098,7 +1105,7 @@ func Test_Rego_MountPolicy_BadDestination(t *testing.T) {
 		index := randMinMax(testRand, 0, int32(len(tc.mounts)-1))
 		tc.mounts[index].Destination = randString(testRand, maxGeneratedMountDestinationLength)
 
-		_, _, err = tc.policy.EnforceCreateContainerPolicy(tc.sandboxID, tc.containerID, tc.argList, tc.envList, tc.workingDir, tc.mounts)
+		_, _, err = tc.policy.EnforceCreateContainerPolicy(tc.sandboxID, tc.containerID, tc.argList, tc.envList, tc.workingDir, tc.mounts, false)
 
 		// not getting an error means something is broken
 		if err == nil {
@@ -1124,7 +1131,7 @@ func Test_Rego_MountPolicy_BadType(t *testing.T) {
 		index := randMinMax(testRand, 0, int32(len(tc.mounts)-1))
 		tc.mounts[index].Type = randString(testRand, 4)
 
-		_, _, err = tc.policy.EnforceCreateContainerPolicy(tc.sandboxID, tc.containerID, tc.argList, tc.envList, tc.workingDir, tc.mounts)
+		_, _, err = tc.policy.EnforceCreateContainerPolicy(tc.sandboxID, tc.containerID, tc.argList, tc.envList, tc.workingDir, tc.mounts, false)
 
 		// not getting an error means something is broken
 		if err == nil {
@@ -1152,7 +1159,7 @@ func Test_Rego_MountPolicy_BadOption(t *testing.T) {
 		oindex := randMinMax(testRand, 0, int32(len(mountToChange.Options)-1))
 		tc.mounts[mindex].Options[oindex] = randString(testRand, maxGeneratedMountOptionLength)
 
-		_, _, err = tc.policy.EnforceCreateContainerPolicy(tc.sandboxID, tc.containerID, tc.argList, tc.envList, tc.workingDir, tc.mounts)
+		_, _, err = tc.policy.EnforceCreateContainerPolicy(tc.sandboxID, tc.containerID, tc.argList, tc.envList, tc.workingDir, tc.mounts, false)
 
 		// not getting an error means something is broken
 		if err == nil {
@@ -1181,7 +1188,7 @@ func Test_Rego_MountPolicy_MountPrivilegedWhenNotAllowed(t *testing.T) {
 		oindex := randMinMax(testRand, 0, int32(len(mountToChange.Options)-1))
 		tc.mounts[mindex].Options[oindex] = randString(testRand, maxGeneratedMountOptionLength)
 
-		_, _, err = tc.policy.EnforceCreateContainerPolicy(tc.sandboxID, tc.containerID, tc.argList, tc.envList, tc.workingDir, tc.mounts)
+		_, _, err = tc.policy.EnforceCreateContainerPolicy(tc.sandboxID, tc.containerID, tc.argList, tc.envList, tc.workingDir, tc.mounts, false)
 
 		// not getting an error means something is broken
 		if err == nil {
@@ -1272,7 +1279,13 @@ func Test_Rego_Version_Unavailable_Enforcement_Point(t *testing.T) {
 		t.Error("unavailable enforcement incorrectly indicated as available")
 	}
 
-	if !info.allowedByDefault {
+	allowed, err := info.defaultResults.Bool("allowed")
+
+	if err != nil {
+		t.Error(err)
+	}
+
+	if !allowed {
 		t.Error("default behavior was incorrect for unavailable enforcement point")
 	}
 }
@@ -1290,22 +1303,77 @@ func Test_Rego_Enforcement_Point_Allowed(t *testing.T) {
 	}
 
 	input := make(map[string]interface{})
-	allowed, err := policy.allowed("__fixture_for_allowed_test_false__", input)
+	results, err := policy.applyDefaults("__fixture_for_allowed_test_false__", input)
 	if err != nil {
-		t.Fatalf("asked whether an enforcement point was allowed and receieved an error: %v", err)
+		t.Fatalf("applied defaults for an enforcement point receieved an error: %v", err)
+	}
+
+	allowed, err := results.Bool("allowed")
+
+	if err != nil {
+		t.Error(err)
 	}
 
 	if allowed {
-		t.Fatal("result of allowed for an unavailable enforcement point was not the specified default (false)")
+		t.Fatal("result of allowed for an available enforcement point was not the specified default (false)")
 	}
 
-	allowed, err = policy.allowed("__fixture_for_allowed_test_true__", input)
+	input = make(map[string]interface{})
+	results, err = policy.applyDefaults("__fixture_for_allowed_test_true__", input)
 	if err != nil {
-		t.Fatalf("asked whether an enforcement point was allowed and receieved an error: %v", err)
+		t.Fatalf("applied defaults for an enforcement point receieved an error: %v", err)
+	}
+
+	allowed, err = results.Bool("allowed")
+
+	if err != nil {
+		t.Error(err)
 	}
 
 	if !allowed {
-		t.Error("result of allowed for an unavailable enforcement point was not the specified default (true)")
+		t.Error("result of allowed for an available enforcement point was not the specified default (true)")
+	}
+}
+
+func Test_Rego_Enforcement_Point_Extra(t *testing.T) {
+	code := `package policy
+	
+api_svn := "0.0.1"
+
+__fixture_for_allowed_extra__ := {"allowed": true}
+`
+	policy, err := newRegoPolicy(code, []oci.Mount{}, []oci.Mount{})
+	if err != nil {
+		t.Fatalf("unable to create a new Rego policy: %v", err)
+	}
+
+	err = policy.injectTestAPI()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	input := make(map[string]interface{})
+	results, err := policy.enforce("__fixture_for_allowed_extra__", input)
+	if err != nil {
+		t.Fatalf("enforcement produced an error: %v", err)
+	}
+
+	allowed, err := results.Bool("allowed")
+
+	if err != nil {
+		t.Error(err)
+	}
+
+	if !allowed {
+		t.Error("result of allowed for an available enforcement point was not the policy value (true)")
+	}
+
+	if extra, ok := results["__test__"]; ok {
+		if extra != "test" {
+			t.Errorf("extra value was not specified default: %s != test", extra)
+		}
+	} else {
+		t.Error("extra value is missing from enforcement result")
 	}
 }
 
@@ -1528,7 +1596,7 @@ exec_external := {
 		}
 
 		envList := generateEnvs(envSet)
-		toKeep, _, err := policy.EnforceCreateContainerPolicy("", "", []string{}, envList, "", []oci.Mount{})
+		toKeep, _, err := policy.EnforceCreateContainerPolicy("", "", []string{}, envList, "", []oci.Mount{}, false)
 		if len(toKeep) > 0 {
 			t.Error("invalid environment variables not filtered from list returned from create_container")
 			return false
@@ -1557,7 +1625,10 @@ exec_external := {
 }
 
 func Test_Rego_InvalidEnvList(t *testing.T) {
-	rego := `package policy
+	rego := fmt.Sprintf(`package policy
+	api_svn := "%s"
+	framework_svn := "%s"
+
 	create_container := {
 		"allowed": true,
 		"env_list": {"an_object": 1}
@@ -1569,37 +1640,40 @@ func Test_Rego_InvalidEnvList(t *testing.T) {
 	exec_external := {
 		"allowed": true,
 		"env_list": true
-	}`
+	}`, apiSVN, frameworkSVN)
 
 	policy, err := newRegoPolicy(rego, []oci.Mount{}, []oci.Mount{})
 	if err != nil {
 		t.Fatalf("error creating policy: %v", err)
 	}
 
-	_, _, err = policy.EnforceCreateContainerPolicy("", "", []string{}, []string{}, "", []oci.Mount{})
+	_, _, err = policy.EnforceCreateContainerPolicy("", "", []string{}, []string{}, "", []oci.Mount{}, false)
 	if err == nil {
 		t.Errorf("expected call to create_container to fail")
 	} else if err.Error() != "policy returned incorrect type for 'env_list', expected []interface{}, received map[string]interface {}" {
-		t.Errorf("incorrected error message from call to create_container")
+		t.Errorf("incorrected error message from call to create_container: %v", err)
 	}
 
 	_, _, err = policy.EnforceExecInContainerPolicy("", []string{}, []string{}, "")
 	if err == nil {
 		t.Errorf("expected call to exec_in_container to fail")
 	} else if err.Error() != "policy returned incorrect type for 'env_list', expected []interface{}, received string" {
-		t.Errorf("incorrected error message from call to exec_in_container")
+		t.Errorf("incorrected error message from call to exec_in_container: %v", err)
 	}
 
 	_, _, err = policy.EnforceExecExternalProcessPolicy([]string{}, []string{}, "")
 	if err == nil {
 		t.Errorf("expected call to exec_external to fail")
 	} else if err.Error() != "policy returned incorrect type for 'env_list', expected []interface{}, received bool" {
-		t.Errorf("incorrected error message from call to exec_external")
+		t.Errorf("incorrected error message from call to exec_external: %v", err)
 	}
 }
 
 func Test_Rego_InvalidEnvList_Member(t *testing.T) {
-	rego := `package policy
+	rego := fmt.Sprintf(`package policy
+	api_svn := "%s"
+	framework_svn := "%s"
+
 	create_container := {
 		"allowed": true,
 		"env_list": ["one", "two", 3]
@@ -1611,32 +1685,32 @@ func Test_Rego_InvalidEnvList_Member(t *testing.T) {
 	exec_external := {
 		"allowed": true,
 		"env_list": ["one", ["two"], "three"]
-	}`
+	}`, apiSVN, frameworkSVN)
 
 	policy, err := newRegoPolicy(rego, []oci.Mount{}, []oci.Mount{})
 	if err != nil {
 		t.Fatalf("error creating policy: %v", err)
 	}
 
-	_, _, err = policy.EnforceCreateContainerPolicy("", "", []string{}, []string{}, "", []oci.Mount{})
+	_, _, err = policy.EnforceCreateContainerPolicy("", "", []string{}, []string{}, "", []oci.Mount{}, false)
 	if err == nil {
 		t.Errorf("expected call to create_container to fail")
 	} else if err.Error() != "members of env_list from policy must be strings, received json.Number" {
-		t.Errorf("incorrected error message from call to create_container")
+		t.Errorf("incorrected error message from call to create_container: %v", err)
 	}
 
 	_, _, err = policy.EnforceExecInContainerPolicy("", []string{}, []string{}, "")
 	if err == nil {
 		t.Errorf("expected call to exec_in_container to fail")
 	} else if err.Error() != "members of env_list from policy must be strings, received bool" {
-		t.Errorf("incorrected error message from call to exec_in_container")
+		t.Errorf("incorrected error message from call to exec_in_container: %v", err)
 	}
 
 	_, _, err = policy.EnforceExecExternalProcessPolicy([]string{}, []string{}, "")
 	if err == nil {
 		t.Errorf("expected call to exec_external to fail")
 	} else if err.Error() != "members of env_list from policy must be strings, received []interface {}" {
-		t.Errorf("incorrected error message from call to exec_external")
+		t.Errorf("incorrected error message from call to exec_external: %v", err)
 	}
 }
 
@@ -1665,7 +1739,7 @@ func Test_Rego_EnforceEnvironmentVariablePolicy_MissingRequired(t *testing.T) {
 			}
 		}
 
-		_, _, err = tc.policy.EnforceCreateContainerPolicy(tc.sandboxID, tc.containerID, tc.argList, envList, tc.workingDir, tc.mounts)
+		_, _, err = tc.policy.EnforceCreateContainerPolicy(tc.sandboxID, tc.containerID, tc.argList, envList, tc.workingDir, tc.mounts, false)
 
 		// not getting an error means something is broken
 		if err == nil {
@@ -2309,7 +2383,8 @@ func Test_Rego_Plan9MountPolicy(t *testing.T) {
 		tc.argList,
 		tc.envList,
 		tc.workingDir,
-		tc.mounts)
+		tc.mounts,
+		false)
 
 	if err != nil {
 		t.Fatalf("Policy enforcement unexpectedly was denied: %v", err)
@@ -2343,7 +2418,8 @@ func Test_Rego_Plan9MountPolicy_No_Matches(t *testing.T) {
 		tc.argList,
 		tc.envList,
 		tc.workingDir,
-		tc.mounts)
+		tc.mounts,
+		false)
 
 	if err == nil {
 		t.Fatal("Policy enforcement unexpectedly was allowed")
@@ -2389,7 +2465,8 @@ func Test_Rego_Plan9UnmountPolicy(t *testing.T) {
 		tc.argList,
 		tc.envList,
 		tc.workingDir,
-		tc.mounts)
+		tc.mounts,
+		false)
 
 	if err == nil {
 		t.Fatal("Policy enforcement unexpectedly was allowed")
@@ -2564,14 +2641,15 @@ func Test_Rego_LoadFragment_Container(t *testing.T) {
 			copyStrings(container.container.Command),
 			copyStrings(container.envList),
 			container.container.WorkingDir,
-			copyMounts(container.mounts))
+			copyMounts(container.mounts),
+			false)
 
 		if err != nil {
 			t.Error("unable to create container from fragment: %w", err)
 			return false
 		}
 
-		if _, ok := tc.policy.modules[moduleID(fragment.info.issuer, fragment.info.feed)]; ok {
+		if tc.policy.rego.IsModuleActive(rpi.ModuleID(fragment.info.issuer, fragment.info.feed)) {
 			t.Error("module not removed after load")
 			return false
 		}
@@ -2614,7 +2692,7 @@ func Test_Rego_LoadFragment_Fragment(t *testing.T) {
 			return false
 		}
 
-		if _, ok := tc.policy.modules[moduleID(fragment.info.issuer, fragment.info.feed)]; ok {
+		if tc.policy.rego.IsModuleActive(rpi.ModuleID(fragment.info.issuer, fragment.info.feed)) {
 			t.Error("module not removed after load")
 			return false
 		}
@@ -2651,7 +2729,7 @@ func Test_Rego_LoadFragment_ExternalProcess(t *testing.T) {
 			return false
 		}
 
-		if _, ok := tc.policy.modules[moduleID(fragment.info.issuer, fragment.info.feed)]; ok {
+		if tc.policy.rego.IsModuleActive(rpi.ModuleID(fragment.info.issuer, fragment.info.feed)) {
 			t.Error("module not removed after load")
 			return false
 		}
@@ -2685,7 +2763,7 @@ func Test_Rego_LoadFragment_BadIssuer(t *testing.T) {
 			return false
 		}
 
-		if _, ok := tc.policy.modules[moduleID(issuer, fragment.info.feed)]; ok {
+		if tc.policy.rego.IsModuleActive(rpi.ModuleID(issuer, fragment.info.feed)) {
 			t.Error("module not removed upon failure")
 			return false
 		}
@@ -2719,7 +2797,7 @@ func Test_Rego_LoadFragment_BadFeed(t *testing.T) {
 			return false
 		}
 
-		if _, ok := tc.policy.modules[moduleID(fragment.info.issuer, feed)]; ok {
+		if tc.policy.rego.IsModuleActive(rpi.ModuleID(fragment.info.issuer, feed)) {
 			t.Error("module not removed upon failure")
 			return false
 		}
@@ -2752,7 +2830,7 @@ func Test_Rego_LoadFragment_InvalidVersion(t *testing.T) {
 			return false
 		}
 
-		if _, ok := tc.policy.modules[moduleID(fragment.info.issuer, fragment.info.feed)]; ok {
+		if tc.policy.rego.IsModuleActive(rpi.ModuleID(fragment.info.issuer, fragment.info.feed)) {
 			t.Error("module not removed upon failure")
 			return false
 		}
@@ -2794,7 +2872,8 @@ func Test_Rego_LoadFragment_SameIssuerTwoFeeds(t *testing.T) {
 				copyStrings(container.container.Command),
 				copyStrings(container.envList),
 				container.container.WorkingDir,
-				copyMounts(container.mounts))
+				copyMounts(container.mounts),
+				false)
 
 			if err != nil {
 				t.Error("unable to create container from fragment: %w", err)
@@ -2839,7 +2918,8 @@ func Test_Rego_LoadFragment_TwoFeeds(t *testing.T) {
 				copyStrings(container.container.Command),
 				copyStrings(container.envList),
 				container.container.WorkingDir,
-				copyMounts(container.mounts))
+				copyMounts(container.mounts),
+				false)
 
 			if err != nil {
 				t.Error("unable to create container from fragment: %w", err)
@@ -2888,7 +2968,8 @@ func Test_Rego_LoadFragment_SameFeedTwice(t *testing.T) {
 				copyStrings(container.container.Command),
 				copyStrings(container.envList),
 				container.container.WorkingDir,
-				copyMounts(container.mounts))
+				copyMounts(container.mounts),
+				false)
 
 			if err != nil {
 				t.Error("unable to create container from fragment: %w", err)
@@ -3005,21 +3086,26 @@ func Test_Rego_LoadFragment_FragmentNamespace(t *testing.T) {
 	fragmentCode := fmt.Sprintf(`package fragment
 
 svn := "1.0.0"
+framework_svn := "%s"
 
 layer := "%s"
 
-mount_device := {"allowed": allowed, "custom": custom} {
+mount_device := {"allowed": allowed, "metadata": [addCustom]} {
 	allowed := input.deviceHash == layer
-	custom := {
+	addCustom := {
+		"name": "custom",
         "action": "add",
         "key": "%s",
         "value": "%s"
 	}
-}`, deviceHash, key, value)
+}`, frameworkSVN, deviceHash, key, value)
 
 	issuer := testDataGenerator.uniqueFragmentIssuer()
 	feed := testDataGenerator.uniqueFragmentFeed()
 	policyCode := fmt.Sprintf(`package policy
+
+api_svn := "%s"
+framework_svn := "%s"
 
 default load_fragment := {"allowed": false}
 
@@ -3030,7 +3116,7 @@ load_fragment := {"allowed": true, "add_module": true} {
 }
 
 mount_device := data.fragment.mount_device
-	`, issuer, feed)
+	`, apiSVN, frameworkSVN, issuer, feed)
 
 	policy, err := newRegoPolicy(policyCode, []oci.Mount{}, []oci.Mount{})
 	if err != nil {
@@ -3047,17 +3133,12 @@ mount_device := data.fragment.mount_device
 		t.Fatalf("unable to mount device: %v", err)
 	}
 
-	custom, err := policy.getMetadata("custom")
-	if err != nil {
-		t.Error("expected metadata stored by fragment is missing")
-	}
-
-	if test, ok := custom[key]; ok {
+	if test, err := policy.rego.GetMetadata("custom", key); err == nil {
 		if test != value {
 			t.Error("incorrect metadata value stored by fragment")
 		}
 	} else {
-		t.Error("unable to located metadata key stored by fragment")
+		t.Errorf("unable to located metadata key stored by fragment: %v", err)
 	}
 }
 
@@ -3172,7 +3253,8 @@ func Test_Rego_StdioAccess_Allowed(t *testing.T) {
 		tc.argList,
 		tc.envList,
 		tc.workingDir,
-		tc.mounts)
+		tc.mounts,
+		false)
 
 	if err != nil {
 		t.Errorf("create_container not allowed: %v", err)
@@ -3228,7 +3310,8 @@ func Test_Rego_EnforeCreateContainerPolicy_StdioAccess_NotAllowed(t *testing.T) 
 		tc.argList,
 		tc.envList,
 		tc.workingDir,
-		tc.mounts)
+		tc.mounts,
+		false)
 
 	if err != nil {
 		t.Errorf("create_container not allowed: %v", err)
@@ -3268,7 +3351,8 @@ func Test_Rego_Container_StdioAccess_NotDecidable(t *testing.T) {
 		tc.argList,
 		tc.envList,
 		tc.workingDir,
-		tc.mounts)
+		tc.mounts,
+		false)
 
 	if err == nil {
 		t.Errorf("expected create_container to not be allowed")
@@ -3303,6 +3387,541 @@ func Test_Rego_ExecExternal_StdioAccess_NotAllowed(t *testing.T) {
 
 	if allow_stdio_access {
 		t.Errorf("expected allow_stdio_access to be false")
+	}
+}
+
+func Test_Rego_EnforceCreateContainerPolicy_AllowElevatedAllowsPrivilegedContainer(t *testing.T) {
+	gc := generateConstraints(testRand, 1)
+	gc.containers[0].AllowElevated = true
+	tc, err := setupRegoCreateContainerTest(gc, gc.containers[0], false)
+	if err != nil {
+		t.Fatalf("error setting up test: %v", err)
+	}
+
+	_, _, err = tc.policy.EnforceCreateContainerPolicy(
+		tc.sandboxID,
+		tc.containerID,
+		tc.argList,
+		tc.envList,
+		tc.workingDir,
+		tc.mounts,
+		true)
+
+	if err != nil {
+		t.Fatalf("expected privilege escalation to be allowed: %s", err)
+	}
+}
+
+func Test_Rego_EnforceCreateContainerPolicy_AllowElevatedAllowsUnprivilegedContainer(t *testing.T) {
+	gc := generateConstraints(testRand, 1)
+	gc.containers[0].AllowElevated = true
+	tc, err := setupRegoCreateContainerTest(gc, gc.containers[0], false)
+	if err != nil {
+		t.Fatalf("error setting up test: %v", err)
+	}
+
+	_, _, err = tc.policy.EnforceCreateContainerPolicy(
+		tc.sandboxID,
+		tc.containerID,
+		tc.argList,
+		tc.envList,
+		tc.workingDir,
+		tc.mounts,
+		false)
+
+	if err != nil {
+		t.Fatalf("expected lack of escalation to be fine: %s", err)
+	}
+}
+
+func Test_Rego_EnforceCreateContainerPolicy_NoAllowElevatedDenysPrivilegedContainer(t *testing.T) {
+	gc := generateConstraints(testRand, 1)
+	gc.containers[0].AllowElevated = false
+	tc, err := setupRegoCreateContainerTest(gc, gc.containers[0], false)
+	if err != nil {
+		t.Fatalf("error setting up test: %v", err)
+	}
+
+	_, _, err = tc.policy.EnforceCreateContainerPolicy(
+		tc.sandboxID,
+		tc.containerID,
+		tc.argList,
+		tc.envList,
+		tc.workingDir,
+		tc.mounts,
+		true)
+
+	if err == nil {
+		t.Fatal("expected escalation to be denied")
+	}
+}
+
+func Test_Rego_EnforceCreateContainerPolicy_NoAllowElevatedAllowsUnprivilegedContainer(t *testing.T) {
+	gc := generateConstraints(testRand, 1)
+	gc.containers[0].AllowElevated = false
+	tc, err := setupRegoCreateContainerTest(gc, gc.containers[0], false)
+	if err != nil {
+		t.Fatalf("error setting up test: %v", err)
+	}
+
+	_, _, err = tc.policy.EnforceCreateContainerPolicy(
+		tc.sandboxID,
+		tc.containerID,
+		tc.argList,
+		tc.envList,
+		tc.workingDir,
+		tc.mounts,
+		false)
+
+	if err != nil {
+		t.Fatalf("expected lack of escalation to be fine: %s", err)
+	}
+}
+
+func Test_Rego_CreateContainer_Framework_SVN(t *testing.T) {
+	gc := generateConstraints(testRand, maxContainersInGeneratedConstraints)
+	tc, err := setupFrameworkSVNTest(gc, frameworkSVN, "100.0.0", 0, frameworkSVN, []string{})
+	if err != nil {
+		t.Fatalf("error setting up test: %v", err)
+	}
+
+	input := map[string]interface{}{}
+	result, err := tc.policy.rego.RawQuery("data.framework.candidate_containers", input)
+
+	if err != nil {
+		t.Fatalf("unable to query containers: %v", err)
+	}
+
+	containers, ok := result[0].Expressions[0].Value.([]interface{})
+	if !ok {
+		t.Fatal("unable to extract containers from result")
+	}
+
+	if len(containers) != len(gc.containers) {
+		t.Error("incorrect number of candidate containers.")
+	}
+
+	err = verifyAllObjectsContainKeyValue(containers, "__test__", "containerExtra")
+	if err != nil {
+		t.Error(err)
+	}
+
+	for _, rawContainer := range containers {
+		container := rawContainer.(map[string]interface{})
+		if envRules, ok := container["env_rules"].([]interface{}); ok {
+			err = verifyAllObjectsContainKeyValue(envRules, "__test__", "containerEnvRuleExtra")
+			if err != nil {
+				t.Error(err)
+			}
+		} else {
+			t.Error("unable to obtain env_rules")
+		}
+
+		if mounts, ok := container["mounts"].([]interface{}); ok {
+			err = verifyAllObjectsContainKeyValue(mounts, "__test__", "containerMountExtra")
+			if err != nil {
+				t.Error(err)
+			}
+		} else {
+			t.Error("unable to obtain mounts")
+		}
+
+		if processes, ok := container["exec_processes"].([]interface{}); ok {
+			err = verifyAllObjectsContainKeyValue(processes, "__test__", "containerExecProcessExtra")
+			if err != nil {
+				t.Error(err)
+			}
+		} else {
+			t.Error("unable to obtain exec_processes")
+		}
+	}
+}
+
+func Test_Rego_CreateContainer_Fragment_Framework_SVN(t *testing.T) {
+	gc := generateConstraints(testRand, maxContainersInGeneratedConstraints)
+	tc, err := setupFrameworkSVNTest(gc, frameworkSVN, "100.0.0", 2, frameworkSVN, []string{"containers"})
+	if err != nil {
+		t.Fatalf("error setting up test: %v", err)
+	}
+
+	numContainers := len(gc.containers)
+	for _, fragment := range tc.fragments {
+		err = tc.policy.LoadFragment(fragment.info.issuer, fragment.info.feed, fragment.code)
+		if err != nil {
+			t.Fatalf("unable to load fragment: %v", err)
+		}
+
+		numContainers += len(fragment.constraints.containers)
+	}
+
+	input := map[string]interface{}{}
+	result, err := tc.policy.rego.RawQuery("data.framework.candidate_containers", input)
+
+	if err != nil {
+		t.Fatalf("unable to query containers: %v", err)
+	}
+
+	containers, ok := result[0].Expressions[0].Value.([]interface{})
+	if !ok {
+		t.Fatal("unable to extract containers from result")
+	}
+
+	if len(containers) != numContainers {
+		t.Error("incorrect number of candidate containers.")
+	}
+
+	err = verifyAllObjectsContainKeyValue(containers, "__test__", "containerExtra")
+	if err != nil {
+		t.Error(err)
+	}
+
+	for _, rawContainer := range containers {
+		container := rawContainer.(map[string]interface{})
+		if envRules, ok := container["env_rules"].([]interface{}); ok {
+			err = verifyAllObjectsContainKeyValue(envRules, "__test__", "containerEnvRuleExtra")
+			if err != nil {
+				t.Error(err)
+			}
+		} else {
+			t.Error("unable to obtain env_rules")
+		}
+
+		if mounts, ok := container["mounts"].([]interface{}); ok {
+			err = verifyAllObjectsContainKeyValue(mounts, "__test__", "containerMountExtra")
+			if err != nil {
+				t.Error(err)
+			}
+		} else {
+			t.Error("unable to obtain mounts")
+		}
+
+		if processes, ok := container["exec_processes"].([]interface{}); ok {
+			err = verifyAllObjectsContainKeyValue(processes, "__test__", "containerExecProcessExtra")
+			if err != nil {
+				t.Error(err)
+			}
+		} else {
+			t.Error("unable to obtain exec_processes")
+		}
+	}
+}
+
+func Test_Rego_ExecProcess_Framework_SVN(t *testing.T) {
+	gc := generateConstraints(testRand, 1)
+	gc.externalProcesses = generateExternalProcesses(testRand)
+	tc, err := setupFrameworkSVNTest(gc, frameworkSVN, "100.0.0", 0, frameworkSVN, []string{})
+	if err != nil {
+		t.Fatalf("error setting up test: %v", err)
+	}
+
+	input := map[string]interface{}{}
+	result, err := tc.policy.rego.RawQuery("data.framework.candidate_external_processes", input)
+
+	if err != nil {
+		t.Fatalf("unable to query external processes: %v", err)
+	}
+
+	external_processes, ok := result[0].Expressions[0].Value.([]interface{})
+	if !ok {
+		t.Fatal("unable to extract external processes from result")
+	}
+
+	if len(external_processes) != len(gc.externalProcesses) {
+		t.Error("incorrect number of candidate external processes.")
+	}
+
+	err = verifyAllObjectsContainKeyValue(external_processes, "__test__", "externalProcessExtra")
+	if err != nil {
+		t.Error(err)
+	}
+
+	for _, rawProcess := range external_processes {
+		process := rawProcess.(map[string]interface{})
+		if envRules, ok := process["env_rules"].([]interface{}); ok {
+			err = verifyAllObjectsContainKeyValue(envRules, "__test__", "externalProcessEnvRuleExtra")
+			if err != nil {
+				t.Error(err)
+			}
+		} else {
+			t.Error("unable to obtain env_rules")
+		}
+	}
+}
+
+func Test_Rego_ExecProcess_Fragment_Framework_SVN(t *testing.T) {
+	gc := generateConstraints(testRand, maxContainersInGeneratedConstraints)
+	gc.externalProcesses = generateExternalProcesses(testRand)
+	tc, err := setupFrameworkSVNTest(gc, frameworkSVN, "100.0.0", 2, frameworkSVN, []string{"external_processes"})
+	if err != nil {
+		t.Fatalf("error setting up test: %v", err)
+	}
+
+	numExternalProcesses := len(gc.externalProcesses)
+	for _, fragment := range tc.fragments {
+		err = tc.policy.LoadFragment(fragment.info.issuer, fragment.info.feed, fragment.code)
+		if err != nil {
+			t.Fatalf("unable to load fragment: %v", err)
+		}
+
+		numExternalProcesses += len(fragment.constraints.externalProcesses)
+	}
+
+	input := map[string]interface{}{}
+	result, err := tc.policy.rego.RawQuery("data.framework.candidate_external_processes", input)
+
+	if err != nil {
+		t.Fatalf("unable to query external processes: %v", err)
+	}
+
+	external_processes, ok := result[0].Expressions[0].Value.([]interface{})
+	if !ok {
+		t.Fatal("unable to extract external processes from result")
+	}
+
+	if len(external_processes) != numExternalProcesses {
+		t.Error("incorrect number of candidate external processes.")
+	}
+
+	err = verifyAllObjectsContainKeyValue(external_processes, "__test__", "externalProcessExtra")
+	if err != nil {
+		t.Error(err)
+	}
+
+	for _, rawProcess := range external_processes {
+		process := rawProcess.(map[string]interface{})
+		if envRules, ok := process["env_rules"].([]interface{}); ok {
+			err = verifyAllObjectsContainKeyValue(envRules, "__test__", "externalProcessEnvRuleExtra")
+			if err != nil {
+				t.Error(err)
+			}
+		} else {
+			t.Error("unable to obtain env_rules")
+		}
+	}
+}
+
+func Test_Rego_Fragment_Framework_SVN(t *testing.T) {
+	gc := generateConstraints(testRand, 1)
+	gc.fragments = generateFragments(testRand, 2)
+	tc, err := setupFrameworkSVNTest(gc, frameworkSVN, "100.0.0", 0, frameworkSVN, []string{})
+	if err != nil {
+		t.Fatalf("error setting up test: %v", err)
+	}
+
+	input := map[string]interface{}{}
+	result, err := tc.policy.rego.RawQuery("data.framework.candidate_fragments", input)
+
+	if err != nil {
+		t.Fatalf("unable to query fragments: %v", err)
+	}
+
+	fragments, ok := result[0].Expressions[0].Value.([]interface{})
+	if !ok {
+		t.Fatal("unable to extract fragments, from result")
+	}
+
+	if len(fragments) != len(gc.fragments) {
+		t.Error("incorrect number of candidate external processes.")
+	}
+
+	err = verifyAllObjectsContainKeyValue(fragments, "__test__", "fragmentExtra")
+	if err != nil {
+		t.Error(err)
+	}
+}
+
+func Test_Rego_Fragment_Subfragment_Framework_SVN(t *testing.T) {
+	gc := generateConstraints(testRand, maxContainersInGeneratedConstraints)
+	gc.fragments = generateFragments(testRand, 2)
+	tc, err := setupFrameworkSVNTest(gc, frameworkSVN, "100.0.0", 2, frameworkSVN, []string{"fragments"})
+	if err != nil {
+		t.Fatalf("error setting up test: %v", err)
+	}
+
+	numFragments := len(gc.fragments)
+	for _, fragment := range tc.fragments {
+		err = tc.policy.LoadFragment(fragment.info.issuer, fragment.info.feed, fragment.code)
+		if err != nil {
+			t.Fatalf("unable to load fragment: %v", err)
+		}
+
+		numFragments += len(fragment.constraints.fragments)
+	}
+
+	input := map[string]interface{}{}
+	result, err := tc.policy.rego.RawQuery("data.framework.candidate_fragments", input)
+
+	if err != nil {
+		t.Fatalf("unable to query fragments: %v", err)
+	}
+
+	fragments, ok := result[0].Expressions[0].Value.([]interface{})
+	if !ok {
+		t.Fatal("unable to extract external processes from result")
+	}
+
+	if len(fragments) != numFragments {
+		t.Error("incorrect number of candidate external processes.")
+	}
+
+	for _, rawFragment := range fragments {
+		fragment := rawFragment.(map[string]interface{})
+		if test, ok := fragment["__test__"].(string); ok {
+			if test != "fragmentExtra" {
+				t.Errorf("incorrect default value applied")
+			}
+		} else {
+			t.Errorf("default value missing")
+		}
+	}
+}
+
+func Test_FrameworkSVN_Missing(t *testing.T) {
+	gc := generateConstraints(testRand, 1)
+	tc, err := setupFrameworkSVNTest(gc, "", frameworkSVN, 0, "", []string{})
+	if err != nil {
+		t.Fatalf("unable to setup test: %v", err)
+	}
+
+	containerID := testDataGenerator.uniqueContainerID()
+	c := selectContainerFromConstraints(gc, testRand)
+
+	layerPaths, err := testDataGenerator.createValidOverlayForContainer(tc.policy, c)
+
+	err = tc.policy.EnforceOverlayMountPolicy(containerID, layerPaths, testDataGenerator.uniqueMountTarget())
+	if err == nil {
+		t.Error("unexpected success. Missing framework_svn should trigger an error.")
+	}
+
+	actual := err.Error()
+	expected := fmt.Sprintf("framework_svn is missing. Current svn: %s", frameworkSVN)
+	if !strings.Contains(actual, expected) {
+		t.Errorf("missing expected error message: %s", expected)
+	}
+}
+
+func Test_Fragment_FrameworkSVN_Missing(t *testing.T) {
+	gc := generateConstraints(testRand, 1)
+	tc, err := setupFrameworkSVNTest(gc, frameworkSVN, frameworkSVN, 1, "", []string{})
+	if err != nil {
+		t.Fatalf("unable to setup test: %v", err)
+	}
+
+	fragment := tc.fragments[0]
+	err = tc.policy.LoadFragment(fragment.info.issuer, fragment.info.feed, fragment.code)
+	if err == nil {
+		t.Error("unexpected success. Missing framework_svn should trigger an error.")
+	}
+
+	actual := err.Error()
+	expected := fmt.Sprintf("fragment framework_svn is missing. Current svn: %s", frameworkSVN)
+	if !strings.Contains(actual, expected) {
+		t.Errorf("missing expected error message: %s", expected)
+	}
+}
+
+func Test_FrameworkSVN_In_Future(t *testing.T) {
+	gc := generateConstraints(testRand, 1)
+	tc, err := setupFrameworkSVNTest(gc, "100.0.0", frameworkSVN, 0, "", []string{})
+	if err != nil {
+		t.Fatalf("unable to setup test: %v", err)
+	}
+
+	containerID := testDataGenerator.uniqueContainerID()
+	c := selectContainerFromConstraints(gc, testRand)
+
+	layerPaths, err := testDataGenerator.createValidOverlayForContainer(tc.policy, c)
+
+	err = tc.policy.EnforceOverlayMountPolicy(containerID, layerPaths, testDataGenerator.uniqueMountTarget())
+	if err == nil {
+		t.Error("unexpected success. Future framework_svn should trigger an error.")
+	}
+
+	actual := err.Error()
+	expected := fmt.Sprintf("framework_svn is ahead of the current svn: 100.0.0 > %s", frameworkSVN)
+	if !strings.Contains(actual, expected) {
+		t.Errorf("missing expected error message: %s", expected)
+	}
+}
+
+func Test_Fragment_FrameworkSVN_In_Future(t *testing.T) {
+	gc := generateConstraints(testRand, 1)
+	tc, err := setupFrameworkSVNTest(gc, frameworkSVN, frameworkSVN, 1, "100.0.0", []string{})
+	if err != nil {
+		t.Fatalf("unable to setup test: %v", err)
+	}
+
+	fragment := tc.fragments[0]
+	err = tc.policy.LoadFragment(fragment.info.issuer, fragment.info.feed, fragment.code)
+	if err == nil {
+		t.Error("unexpected success. Future framework_svn should trigger an error.")
+	}
+
+	actual := err.Error()
+	expected := fmt.Sprintf("fragment framework_svn is ahead of the current svn: 100.0.0 > %s", frameworkSVN)
+	if !strings.Contains(actual, expected) {
+		t.Errorf("missing expected error message: %s", expected)
+	}
+}
+
+func Test_Rego_MissingEnvList(t *testing.T) {
+	code := fmt.Sprintf(`package policy
+
+	api_svn := "%s"
+
+	create_container := {"allowed": true}
+	exec_in_container := {"allowed": true}
+	exec_external := {"allowed": true}
+	`, apiSVN)
+
+	policy, err := newRegoPolicy(code, []oci.Mount{}, []oci.Mount{})
+	if err != nil {
+		t.Fatalf("error compiling the rego policy: %v", err)
+	}
+
+	sandboxID := generateSandboxID(testRand)
+	containerID := generateContainerID(testRand)
+	command := generateCommand(testRand)
+	expectedEnvs := generateEnvironmentVariables(testRand)
+	workingDir := generateWorkingDir(testRand)
+	privileged := randBool(testRand)
+
+	actualEnvs, _, err := policy.EnforceCreateContainerPolicy(
+		sandboxID,
+		containerID,
+		command,
+		expectedEnvs,
+		workingDir,
+		[]oci.Mount{},
+		privileged,
+	)
+
+	if err != nil {
+		t.Errorf("unexpected error when calling EnforceCreateContainerPolicy: %v", err)
+	}
+
+	if !areStringArraysEqual(actualEnvs, expectedEnvs) {
+		t.Error("invalid envList returned from EnforceCreateContainerPolicy")
+	}
+
+	actualEnvs, _, err = policy.EnforceExecInContainerPolicy(containerID, command, expectedEnvs, workingDir)
+
+	if err != nil {
+		t.Errorf("unexpected error when calling EnforceExecInContainerPolicy: %v", err)
+	}
+
+	if !areStringArraysEqual(actualEnvs, expectedEnvs) {
+		t.Error("invalid envList returned from EnforceExecInContainerPolicy")
+	}
+
+	actualEnvs, _, err = policy.EnforceExecExternalProcessPolicy(command, expectedEnvs, workingDir)
+
+	if err != nil {
+		t.Errorf("unexpected error when calling EnforceExecExternalProcessPolicy: %v", err)
+	}
+
+	if !areStringArraysEqual(actualEnvs, expectedEnvs) {
+		t.Error("invalid envList returned from EnforceExecExternalProcessPolicy")
 	}
 }
 
@@ -3602,7 +4221,7 @@ func runContainer(enforcer *regoEnforcer, container *securityPolicyContainer, de
 	}
 	mountSpec := buildMountSpecFromMountArray(mounts, sandboxID, testRand)
 
-	_, _, err = enforcer.EnforceCreateContainerPolicy(sandboxID, containerID, container.Command, envList, container.WorkingDir, mountSpec.Mounts)
+	_, _, err = enforcer.EnforceCreateContainerPolicy(sandboxID, containerID, container.Command, envList, container.WorkingDir, mountSpec.Mounts, false)
 	if err != nil {
 		return nil, err
 	}
@@ -3844,7 +4463,7 @@ func setupRegoFragmentTestConfig(gc *generatedConstraints, numFragments int, inc
 		}
 	}
 
-	fragments := selectFragmentsFromConstraints(gc, numFragments, includes, excludes, versionError)
+	fragments := selectFragmentsFromConstraints(gc, numFragments, includes, excludes, versionError, frameworkSVN)
 
 	containers := make([]*regoFragmentContainer, numFragments)
 	subFragments := make([]*regoFragment, numFragments)
@@ -3868,7 +4487,7 @@ func setupRegoFragmentTestConfig(gc *generatedConstraints, numFragments int, inc
 		for _, include := range fragment.info.includes {
 			switch include {
 			case "fragments":
-				subFragments[i] = selectFragmentsFromConstraints(fragment.constraints, 1, []string{"containers"}, []string{}, false)[0]
+				subFragments[i] = selectFragmentsFromConstraints(fragment.constraints, 1, []string{"containers"}, []string{}, false, frameworkSVN)[0]
 				break
 
 			case "external_processes":
@@ -4044,6 +4663,95 @@ func setupRegoDropEnvsTest(disjoint bool) (*regoContainerTestConfig, error) {
 	}, nil
 }
 
+type regoFrameworkSVNTestConfig struct {
+	policy    *regoEnforcer
+	fragments []*regoFragment
+}
+
+func setFrameworkSVN(code string, svn string) string {
+	template := `framework_svn := "%s"`
+	old := fmt.Sprintf(template, frameworkSVN)
+	if svn == "" {
+		return strings.Replace(code, old, "", 1)
+	}
+
+	new := fmt.Sprintf(template, svn)
+	return strings.Replace(code, old, new, 1)
+}
+
+func setupFrameworkSVNTest(gc *generatedConstraints, policy_svn string, svn string, numFragments int, fragment_svn string, includes []string) (*regoFrameworkSVNTestConfig, error) {
+	fragments := make([]*regoFragment, 0, numFragments)
+	if numFragments > 0 {
+		gc.fragments = generateFragments(testRand, int32(numFragments))
+		fragments = selectFragmentsFromConstraints(gc, numFragments, includes, []string{}, false, fragment_svn)
+	}
+
+	securityPolicy := gc.toPolicy()
+	policy, err := newRegoPolicy(setFrameworkSVN(securityPolicy.marshalRego(), policy_svn), []oci.Mount{}, []oci.Mount{})
+	if err != nil {
+		return nil, err
+	}
+
+	data, err := policy.rego.GetData("objectDefaults")
+	if err != nil {
+		return nil, err
+	}
+
+	objectDefaults := data.(map[string]interface{})
+	containerDefaults := objectDefaults["container"].(map[string]interface{})
+	containerDefaults["__test__"] = map[string]interface{}{
+		"introduced_version": svn,
+		"default_value":      "containerExtra",
+	}
+	containerEnvRules := containerDefaults["env_rules"].(map[string]interface{})
+	containerEnvRuleItem := containerEnvRules["item"].(map[string]interface{})
+	containerEnvRuleItem["__test__"] = map[string]interface{}{
+		"introduced_version": svn,
+		"default_value":      "containerEnvRuleExtra",
+	}
+	containerMounts := containerDefaults["mounts"].(map[string]interface{})
+	containerMountItem := containerMounts["item"].(map[string]interface{})
+	containerMountItem["__test__"] = map[string]interface{}{
+		"introduced_version": svn,
+		"default_value":      "containerMountExtra",
+	}
+	containerExecProcesses := containerDefaults["exec_processes"].(map[string]interface{})
+	containerExecProcessItem := containerExecProcesses["item"].(map[string]interface{})
+	containerExecProcessItem["__test__"] = map[string]interface{}{
+		"introduced_version": svn,
+		"default_value":      "containerExecProcessExtra",
+	}
+
+	externalProcessDefaults := objectDefaults["external_process"].(map[string]interface{})
+	externalProcessDefaults["__test__"] = map[string]interface{}{
+		"introduced_version": svn,
+		"default_value":      "externalProcessExtra",
+	}
+	externalProcessEnvRules := externalProcessDefaults["env_rules"].(map[string]interface{})
+	externalProcessEnvRuleItem := externalProcessEnvRules["item"].(map[string]interface{})
+	externalProcessEnvRuleItem["__test__"] = map[string]interface{}{
+		"introduced_version": svn,
+		"default_value":      "externalProcessEnvRuleExtra",
+	}
+
+	fragmentDefaults := objectDefaults["fragment"].(map[string]interface{})
+	fragmentDefaults["__test__"] = map[string]interface{}{
+		"introduced_version": svn,
+		"default_value":      "fragmentExtra",
+	}
+	policy.rego.UpdateData("objectDefaults", objectDefaults)
+
+	code := strings.Replace(frameworkCodeTemplate, "@@FRAMEWORK_SVN@@", svn, 1)
+	policy.rego.RemoveModule("framework.rego")
+	policy.rego.AddModule("framework.rego", &rpi.RegoModule{Namespace: "framework", Code: code})
+	err = policy.rego.Compile()
+	if err != nil {
+		return nil, err
+	}
+
+	return &regoFrameworkSVNTestConfig{policy: policy, fragments: fragments}, nil
+}
+
 type regoFragment struct {
 	info        *fragment
 	constraints *generatedConstraints
@@ -4054,7 +4762,7 @@ func (f *regoFragment) selectContainer() *securityPolicyContainer {
 	return selectContainerFromConstraints(f.constraints, testRand)
 }
 
-func selectFragmentsFromConstraints(gc *generatedConstraints, numFragments int, includes []string, excludes []string, versionError bool) []*regoFragment {
+func selectFragmentsFromConstraints(gc *generatedConstraints, numFragments int, includes []string, excludes []string, versionError bool, fragmentFrameworkSVN string) []*regoFragment {
 	choices := randChoices(testRand, numFragments, len(gc.fragments))
 	fragments := make([]*regoFragment, numFragments)
 	for i, choice := range choices {
@@ -4091,6 +4799,8 @@ func selectFragmentsFromConstraints(gc *generatedConstraints, numFragments int, 
 		namespace := testDataGenerator.uniqueFragmentNamespace()
 		fragmentHeader := fmt.Sprintf("package %s\n\nsvn := \"%s\"\n", namespace, version)
 		code = strings.Replace(code, "package policy", fragmentHeader, 1)
+		code = setFrameworkSVN(code, fragmentFrameworkSVN)
+
 		fragments[i] = &regoFragment{
 			info:        config,
 			constraints: constraints,
@@ -4167,26 +4877,11 @@ func buildMountSpecFromMountArray(mounts []mountInternal, sandboxID string, r *r
 //go:embed api_test.rego
 var apiTestCode string
 
-func (policy *regoEnforcer) injectTestAPI() error {
-	modules := map[string]string{
-		"policy.rego":    policy.code,
-		"api.rego":       apiTestCode,
-		"framework.rego": frameworkCode,
-	}
+func (p *regoEnforcer) injectTestAPI() error {
+	p.rego.RemoveModule("api.rego")
+	p.rego.AddModule("api.rego", &rpi.RegoModule{Namespace: "api", Code: apiTestCode})
 
-	// TODO temporary hack for debugging policies until GCS logging design
-	// and implementation is finalized. This option should be changed to
-	// "true" if debugging is desired.
-	options := ast.CompileOpts{
-		EnablePrintStatements: false,
-	}
-
-	if compiled, err := ast.CompileModulesWithOpt(modules, options); err == nil {
-		policy.compiledModules = compiled
-		return nil
-	} else {
-		return fmt.Errorf("rego compilation failed: %w", err)
-	}
+	return p.rego.Compile()
 }
 
 func selectContainerFromRunningContainers(containers []regoRunningContainer, r *rand.Rand) regoRunningContainer {
@@ -4461,7 +5156,7 @@ func verifyPolicyRules(apiSVN string, enforcementPoints map[string]interface{}, 
 	query := rego.New(
 		rego.Query("data.policy"),
 		rego.Module("policy.rego", policyCode),
-		rego.Module("framework.rego", frameworkCode))
+		rego.Module("framework.rego", FrameworkCode))
 
 	ctx := context.Background()
 	resultSet, err := query.Eval(ctx)
@@ -4483,12 +5178,27 @@ func verifyPolicyRules(apiSVN string, enforcementPoints map[string]interface{}, 
 	}
 
 	for rule := range policyTemplateRules {
-		if rule == "api_svn" || rule == "reason" {
+		if rule == "api_svn" || rule == "framework_svn" || rule == "reason" {
 			continue
 		}
 
 		if _, ok := enforcementPoints[rule]; !ok {
 			return fmt.Errorf("Rule %s in policy template is missing from API", rule)
+		}
+	}
+
+	return nil
+}
+
+func verifyAllObjectsContainKeyValue(objects []interface{}, key string, expectedValue string) error {
+	for _, rawObject := range objects {
+		object := rawObject.(map[string]interface{})
+		if actualValue, ok := object[key].(string); ok {
+			if actualValue != expectedValue {
+				return fmt.Errorf("incorrect value for %s: %s != %s (expected)", key, actualValue, expectedValue)
+			}
+		} else {
+			return fmt.Errorf("missing value for %s", key)
 		}
 	}
 

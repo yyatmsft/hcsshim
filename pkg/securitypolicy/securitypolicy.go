@@ -2,6 +2,7 @@ package securitypolicy
 
 import (
 	"crypto/sha256"
+	_ "embed"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -13,6 +14,19 @@ import (
 	"github.com/Microsoft/hcsshim/internal/guestpath"
 	"github.com/pkg/errors"
 )
+
+//go:embed framework.rego
+var frameworkCodeTemplate string
+
+//go:embed api.rego
+var apiCodeTemplate string
+
+//go:embed framework_objects.json
+var frameworkObjectsTemplate string
+
+var APICode = strings.Replace(apiCodeTemplate, "@@API_SVN@@", apiSVN, 1)
+var FrameworkCode = strings.Replace(frameworkCodeTemplate, "@@FRAMEWORK_SVN@@", frameworkSVN, 1)
+var FrameworkObjects = strings.Replace(frameworkObjectsTemplate, "@@FRAMEWORK_SVN@@", frameworkSVN, 1)
 
 var ErrInvalidOpenDoorPolicy = errors.New("allow_all cannot be set to 'true' when Containers are non-empty")
 
@@ -96,6 +110,12 @@ type ExecProcessConfig struct {
 	Command []string         `json:"command" toml:"command"`
 	Signals []syscall.Signal `json:"signals" toml:"signals"`
 }
+
+//go:embed svn_api
+var apiSVN string
+
+//go:embed svn_framework
+var frameworkSVN string
 
 // NewEnvVarRules creates slice of EnvRuleConfig's from environment variables
 // strings slice.
