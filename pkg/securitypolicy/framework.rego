@@ -70,7 +70,7 @@ overlay_mounted(target) {
 default candidate_containers := []
 
 candidate_containers := containers {
-    semver.compare(data.policy.framework_svn, svn) == 0    
+    semver.compare(data.policy.framework_svn, svn) == 0
 
     policy_containers := [c | c := data.policy.containers[_]]
     fragment_containers := [c |
@@ -92,7 +92,7 @@ candidate_containers := containers {
         c := fragment.containers[_]
     ]
 
-    containers := array.concat(policy_containers, fragment_containers)  
+    containers := array.concat(policy_containers, fragment_containers)
 }
 
 default mount_overlay := {"allowed": false}
@@ -231,6 +231,10 @@ privileged_ok(elevation_allowed) {
     input.privileged == elevation_allowed
 }
 
+noNewPrivileges_ok(no_new_privileges) {
+    input.noNewPrivileges == no_new_privileges
+}
+
 default container_started := false
 
 container_started {
@@ -249,6 +253,10 @@ create_container := {"metadata": [updateMatches, addStarted],
     # mount list
     possible_containers := [container |
         container := data.metadata.matches[input.containerID][_]
+        # NB any change to these narrowing conditions should be reflected in
+        # the error handling, such that error messaging correctly reflects
+        # the narrowing process.
+        noNewPrivileges_ok(container.no_new_privileges)
         privileged_ok(container.allow_elevated)
         workingDirectory_ok(container.working_dir)
         command_ok(container.command)
@@ -367,7 +375,11 @@ exec_in_container := {"metadata": [updateMatches],
     # narrow our matches based upon the process requested
     possible_containers := [container |
         container := data.metadata.matches[input.containerID][_]
+        # NB any change to these narrowing conditions should be reflected in
+        # the error handling, such that error messaging correctly reflects
+        # the narrowing process.
         workingDirectory_ok(container.working_dir)
+        noNewPrivileges_ok(container.no_new_privileges)
         some process in container.exec_processes
         command_ok(process.command)
     ]
@@ -493,7 +505,7 @@ enforcement_point_info := {"available": false, "default_results": {"allow": fals
 default candidate_external_processes := []
 
 candidate_external_processes := external_processes {
-    semver.compare(data.policy.framework_svn, svn) == 0    
+    semver.compare(data.policy.framework_svn, svn) == 0
 
     policy_external_processes := [e | e := data.policy.external_processes[_]]
     fragment_external_processes := [e |
@@ -515,7 +527,7 @@ candidate_external_processes := external_processes {
         e := fragment.external_processes[_]
     ]
 
-    external_processes := array.concat(policy_external_processes, fragment_external_processes)  
+    external_processes := array.concat(policy_external_processes, fragment_external_processes)
 }
 
 external_process_ok(process) {
@@ -529,15 +541,17 @@ default exec_external := {"allowed": false}
 exec_external := {"allowed": true,
                   "allow_stdio_access": allow_stdio_access,
                   "env_list": env_list} {
-    print(count(candidate_external_processes))
-
     possible_processes := [process |
         process := candidate_external_processes[_]
+        # NB any change to these narrowing conditions should be reflected in
+        # the error handling, such that error messaging correctly reflects
+        # the narrowing process.
         workingDirectory_ok(process.working_dir)
         command_ok(process.command)
     ]
 
-    print(count(possible_processes))
+    count(possible_processes) > 0
+
     # check to see if the environment variables match, dropping
     # them if allowed (and necessary)
     env_list := valid_envs_for_all(possible_processes)
@@ -592,11 +606,10 @@ apply_defaults(name, raw_values, framework_svn) := values {
 apply_defaults(name, raw_values, framework_svn) := values {
     semver.compare(framework_svn, svn) < 0
     template := load_defaults(name, framework_svn)
-    print(template)
-    values := [updated | 
+    values := [updated |
         raw := raw_values[_]
         flat := object.union(template, raw)
-        arrays := {key: values |            
+        arrays := {key: values |
             template[key]["__array__"]
             item_template := template[key]["item"]
             values := [object.union(item_template, raw) | raw := raw[key][_]]
@@ -651,8 +664,8 @@ update_issuer(includes) := issuer {
 default candidate_fragments := []
 
 candidate_fragments := fragments {
-    semver.compare(data.policy.framework_svn, svn) == 0    
-    
+    semver.compare(data.policy.framework_svn, svn) == 0
+
     policy_fragmemnts := [f | f := data.policy.fragments[_]]
     fragment_fragments := [f |
         feed := data.metadata.issuers[_].feeds[_]
@@ -673,7 +686,7 @@ candidate_fragments := fragments {
         f := fragment.fragments[_]
     ]
 
-    fragments := array.concat(policy_fragments, fragment_fragments)  
+    fragments := array.concat(policy_fragments, fragment_fragments)
 }
 
 default load_fragment := {"allowed": false}
@@ -753,7 +766,7 @@ object_default(info, svn) := value {
 
 item_default(info, svn) := value {
     semver.compare(svn, info.introduced_version) >= 0
-    value := null    
+    value := null
 }
 
 item_default(info, svn) := value {
@@ -880,18 +893,113 @@ env_matches(env) {
     input.rule in ["exec_external"]
     some process in data.policy.external_processes
     some rule in process.env_rules
-    env_ok(rule.pattern, rule.strategy, input.envList)
+    env_ok(rule.pattern, rule.strategy, env)
 }
 
 errors[envError] {
     input.rule in ["create_container", "exec_in_container", "exec_external"]
-    bad_envs := [env |
+    bad_envs := [invalid |
         env := input.envList[_]
         not env_matches(env)
+        parts := split(env, "=")
+        invalid = parts[0]
     ]
 
     count(bad_envs) > 0
     envError := concat(" ", ["invalid env list:", concat(",", bad_envs)])
+}
+
+env_rule_matches(rule) {
+    some env in input.envList
+    env_ok(rule.pattern, rule.strategy, env)
+}
+
+errors["missing required environment variable"] {
+    input.rule == "create_container"
+
+    not container_started
+    possible_containers := [container |
+        container := data.metadata.matches[input.containerID][_]
+        noNewPrivileges_ok(container.no_new_privileges)
+        privileged_ok(container.allow_elevated)
+        workingDirectory_ok(container.working_dir)
+        command_ok(container.command)
+        mountList_ok(container.mounts, container.allow_elevated)
+    ]
+
+    count(possible_containers) > 0
+
+    containers := [container |
+        container := possible_containers[_]
+        missing_rules := {invalid |
+            invalid := {rule |
+                rule := container.env_rules[_]
+                rule.required
+                not env_rule_matches(rule)
+            }
+            count(invalid) > 0
+        }
+        count(missing_rules) > 0
+    ]
+
+    count(containers) > 0
+}
+
+errors["missing required environment variable"] {
+    input.rule == "exec_in_container"
+
+    container_started
+    possible_containers := [container |
+        container := data.metadata.matches[input.containerID][_]
+        noNewPrivileges_ok(container.no_new_privileges)
+        workingDirectory_ok(container.working_dir)
+        some process in container.exec_processes
+        command_ok(process.command)
+    ]
+
+    count(possible_containers) > 0
+
+    containers := [container |
+        container := possible_containers[_]
+        missing_rules := {invalid |
+            invalid := {rule |
+                rule := container.env_rules[_]
+                rule.required
+                not env_rule_matches(rule)
+            }
+            count(invalid) > 0
+        }
+        count(missing_rules) > 0
+    ]
+
+    count(containers) > 0
+}
+
+errors["missing required environment variable"] {
+    input.rule == "exec_external"
+
+    possible_processes := [process |
+        process := candidate_external_processes[_]
+        workingDirectory_ok(process.working_dir)
+        command_ok(process.command)
+    ]
+
+    count(possible_processes) > 0
+
+    processes := [process |
+        process := possible_processes[_]
+        missing_rules := {invalid |
+            invalid := {rule |
+                rule := process.env_rules[_]
+                rule.required
+                not env_rule_matches(rule)
+            }
+            count(invalid) > 0
+        }
+        count(missing_rules) > 0
+    ]
+
+    count(processes) > 0
 }
 
 default workingDirectory_matches := false
@@ -904,7 +1012,7 @@ workingDirectory_matches {
 
 workingDirectory_matches {
     input.rule == "exec_external"
-    some process in data.external_processes
+    some process in data.policy.external_processes
     workingDirectory_ok(process.working_dir)
 }
 
@@ -1039,11 +1147,90 @@ errors[framework_svn_error] {
 }
 
 errors[fragment_framework_svn_error] {
-    not data[input.namespace].framework_svn   
-    fragment_framework_svn_error := concat(" ", ["fragment framework_svn is missing. Current svn:", svn])     
+    not data[input.namespace].framework_svn
+    fragment_framework_svn_error := concat(" ", ["fragment framework_svn is missing. Current svn:", svn])
 }
 
 errors[fragment_framework_svn_error] {
     semver.compare(data[input.namespace].framework_svn, svn) > 0
     fragment_framework_svn_error := concat(" ", ["fragment framework_svn is ahead of the current svn:", data[input.namespace].framework_svn, ">", svn])
+}
+
+errors["containers only distinguishable by allow_stdio_access"] {
+    input.rule == "create_container"
+
+    not container_started
+    possible_containers := [container |
+        container := data.metadata.matches[input.containerID][_]
+        noNewPrivileges_ok(container.no_new_privileges)
+        privileged_ok(container.allow_elevated)
+        workingDirectory_ok(container.working_dir)
+        command_ok(container.command)
+        mountList_ok(container.mounts, container.allow_elevated)
+    ]
+
+    count(possible_containers) > 0
+
+    # check to see if the environment variables match, dropping
+    # them if allowed (and necessary)
+    env_list := valid_envs_for_all(possible_containers)
+    containers := [container |
+        container := possible_containers[_]
+        envList_ok(container.env_rules, env_list)
+    ]
+
+    count(containers) > 0
+
+    allow_stdio_access := containers[0].allow_stdio_access
+    some c in containers
+    c.allow_stdio_access != allow_stdio_access
+}
+
+errors["external processes only distinguishable by allow_stdio_access"] {
+    input.rule == "exec_external"
+
+    possible_processes := [process |
+        process := candidate_external_processes[_]
+        workingDirectory_ok(process.working_dir)
+        command_ok(process.command)
+    ]
+
+    count(possible_processes) > 0
+
+    # check to see if the environment variables match, dropping
+    # them if allowed (and necessary)
+    env_list := valid_envs_for_all(possible_processes)
+    processes := [process |
+        process := possible_processes[_]
+        envList_ok(process.env_rules, env_list)
+    ]
+
+    count(processes) > 0
+
+    allow_stdio_access := processes[0].allow_stdio_access
+    some p in processes
+    p.allow_stdio_access != allow_stdio_access
+}
+
+
+default noNewPrivileges_matches := false
+
+noNewPrivileges_matches {
+    input.rule == "create_container"
+    some container in data.metadata.matches[input.containerID]
+    noNewPrivileges_ok(container.no_new_privileges)
+}
+
+noNewPrivileges_matches {
+    input.rule == "exec_in_container"
+    some container in data.metadata.matches[input.containerID]
+    some process in container.exec_processes
+    command_ok(process.command)
+    workingDirectory_ok(process.working_dir)
+    noNewPrivileges_ok(process.no_new_privileges)
+}
+
+errors["invalid noNewPrivileges"] {
+    input.rule in ["create_container", "exec_in_container"]
+    not noNewPrivileges_matches
 }

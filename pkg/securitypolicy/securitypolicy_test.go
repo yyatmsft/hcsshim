@@ -309,7 +309,7 @@ func Test_EnforceOverlayMountPolicy_Overlay_Single_Container_Twice_With_Differen
 		containerIDOne = generateContainerID(testRand)
 		containerIDTwo = generateContainerID(testRand)
 	}
-	container := selectContainerFromConstraints(p, testRand)
+	container := selectContainerFromContainerList(p.containers, testRand)
 
 	layerPaths, err := testDataGenerator.createValidOverlayForContainer(sp, container)
 	if err != nil {
@@ -946,7 +946,7 @@ func setupContainerWithOverlay(gc *generatedConstraints, valid bool) (tc *testCo
 	sp := NewStandardSecurityPolicyEnforcer(gc.containers, ignoredEncodedPolicyString)
 
 	containerID := testDataGenerator.uniqueContainerID()
-	c := selectContainerFromConstraints(gc, testRand)
+	c := selectContainerFromContainerList(gc.containers, testRand)
 
 	var layerPaths []string
 	if valid {
@@ -1005,6 +1005,7 @@ func generateConstraintsContainer(r *rand.Rand, minNumberOfLayers, maxNumberOfLa
 	c.ExecProcesses = generateExecProcesses(r)
 	c.Signals = generateListOfSignals(r, 0, maxSignalNumber)
 	c.AllowStdioAccess = randBool(r)
+	c.NoNewPrivileges = randBool(r)
 
 	return &c
 }
@@ -1093,6 +1094,16 @@ func buildEnvironmentVariablesFromEnvRules(rules []EnvRuleConfig, r *rand.Rand) 
 	// variable
 	numberOfRules := int32(len(rules))
 	numberOfMatches := randMinMax(r, 1, numberOfRules)
+
+	// Build in all required rules, this isn't a setup method of "missing item"
+	// tests
+	for _, rule := range rules {
+		if rule.Required {
+			vars = append(vars, rule.Rule)
+			numberOfMatches--
+		}
+	}
+
 	usedIndexes := map[int]struct{}{}
 	for numberOfMatches > 0 {
 		anIndex := -1
@@ -1217,9 +1228,8 @@ func generateSignal(r *rand.Rand) syscall.Signal {
 	return syscall.Signal(atLeastOneAtMost(r, maxSignalNumber))
 }
 
-func selectContainerFromConstraints(constraints *generatedConstraints, r *rand.Rand) *securityPolicyContainer {
-	numberOfContainersInConstraints := len(constraints.containers)
-	return constraints.containers[r.Intn(numberOfContainersInConstraints)]
+func selectContainerFromContainerList(containers []*securityPolicyContainer, r *rand.Rand) *securityPolicyContainer {
+	return containers[r.Intn(len(containers))]
 }
 
 type dataGenerator struct {

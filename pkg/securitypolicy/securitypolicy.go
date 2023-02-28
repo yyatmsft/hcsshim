@@ -37,6 +37,8 @@ const (
 	EnvVarRuleRegex  EnvVarRule = "re2"
 )
 
+const plan9Prefix = "plan9://"
+
 // PolicyConfig contains toml or JSON config for security policy.
 type PolicyConfig struct {
 	AllowAll                         bool                    `json:"allow_all" toml:"allow_all"`
@@ -50,6 +52,16 @@ type PolicyConfig struct {
 	// AllowUnencryptedScratch is a global policy configuration that allows
 	// all containers within a pod to be run without scratch encryption.
 	AllowUnencryptedScratch bool `json:"allow_unencrypted_scratch" toml:"allow_unencrypted_scratch"`
+}
+
+func NewPolicyConfig(opts ...PolicyConfigOpt) (*PolicyConfig, error) {
+	p := &PolicyConfig{}
+	for _, o := range opts {
+		if err := o(p); err != nil {
+			return nil, err
+		}
+	}
+	return p, nil
 }
 
 // ExternalProcessConfig contains toml or JSON config for running external processes in the UVM.
@@ -84,16 +96,17 @@ type EnvRuleConfig struct {
 // ContainerConfig contains toml or JSON config for container described
 // in security policy.
 type ContainerConfig struct {
-	ImageName        string              `json:"image_name" toml:"image_name"`
-	Command          []string            `json:"command" toml:"command"`
-	Auth             AuthConfig          `json:"auth" toml:"auth"`
-	EnvRules         []EnvRuleConfig     `json:"env_rules" toml:"env_rule"`
-	WorkingDir       string              `json:"working_dir" toml:"working_dir"`
-	Mounts           []MountConfig       `json:"mounts" toml:"mount"`
-	AllowElevated    bool                `json:"allow_elevated" toml:"allow_elevated"`
-	ExecProcesses    []ExecProcessConfig `json:"exec_processes" toml:"exec_process"`
-	Signals          []syscall.Signal    `json:"signals" toml:"signals"`
-	AllowStdioAccess bool                `json:"allow_stdio_access" toml:"allow_stdio_access"`
+	ImageName                string              `json:"image_name" toml:"image_name"`
+	Command                  []string            `json:"command" toml:"command"`
+	Auth                     AuthConfig          `json:"auth" toml:"auth"`
+	EnvRules                 []EnvRuleConfig     `json:"env_rules" toml:"env_rule"`
+	WorkingDir               string              `json:"working_dir" toml:"working_dir"`
+	Mounts                   []MountConfig       `json:"mounts" toml:"mount"`
+	AllowElevated            bool                `json:"allow_elevated" toml:"allow_elevated"`
+	ExecProcesses            []ExecProcessConfig `json:"exec_processes" toml:"exec_process"`
+	Signals                  []syscall.Signal    `json:"signals" toml:"signals"`
+	AllowStdioAccess         bool                `json:"allow_stdio_access" toml:"allow_stdio_access"`
+	AllowPrivilegeEscalation bool                `json:"allow_privilege_escalation" toml:"allow_privilege_escalation"`
 }
 
 // MountConfig contains toml or JSON config for mount security policy
@@ -194,7 +207,8 @@ type Container struct {
 	AllowElevated    bool                `json:"allow_elevated"`
 	ExecProcesses    []ExecProcessConfig `json:"-"`
 	Signals          []syscall.Signal    `json:"-"`
-	AllowStdioAccess bool                `json:"_"`
+	AllowStdioAccess bool                `json:"-"`
+	NoNewPrivileges  bool                `json:"-"`
 }
 
 // StringArrayMap wraps an array of strings as a string map.
@@ -236,7 +250,8 @@ func CreateContainerPolicy(
 	allowElevated bool,
 	execProcesses []ExecProcessConfig,
 	signals []syscall.Signal,
-	AllowStdioAccess bool,
+	allowStdioAccess bool,
+	noNewPrivileges bool,
 ) (*Container, error) {
 	if err := validateEnvRules(envRules); err != nil {
 		return nil, err
@@ -253,7 +268,8 @@ func CreateContainerPolicy(
 		AllowElevated:    allowElevated,
 		ExecProcesses:    execProcesses,
 		Signals:          signals,
-		AllowStdioAccess: AllowStdioAccess,
+		AllowStdioAccess: allowStdioAccess,
+		NoNewPrivileges:  noNewPrivileges,
 	}, nil
 }
 
@@ -361,7 +377,8 @@ func newOptionsFromConfig(mCfg *MountConfig) []string {
 // mount type.
 func newMountTypeFromConfig(mCfg *MountConfig) string {
 	if strings.HasPrefix(mCfg.HostPath, guestpath.SandboxMountPrefix) ||
-		strings.HasPrefix(mCfg.HostPath, guestpath.HugePagesMountPrefix) {
+		strings.HasPrefix(mCfg.HostPath, guestpath.HugePagesMountPrefix) ||
+		strings.HasPrefix(mCfg.HostPath, plan9Prefix) {
 		return "bind"
 	}
 	return "none"
