@@ -10,7 +10,7 @@ schedules:
     always: true
 
 variables:
-  WindowsContainerImage: cdpxwin1809.azurecr.io/global/vse2019:latest
+  WindowsContainerImage: onebranch.azurecr.io/windows/ltsc2019/vse2022:latest
   LGTM.UploadSnapshot: true
   # This needs to be removed when if we ever start building container images from this repository
   DisableDockerDetector: true
