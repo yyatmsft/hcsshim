@@ -24,8 +24,8 @@ import (
 
 	testutilities "github.com/Microsoft/hcsshim/test/internal"
 	testcmd "github.com/Microsoft/hcsshim/test/internal/cmd"
-	"github.com/Microsoft/hcsshim/test/internal/require"
-	testuvm "github.com/Microsoft/hcsshim/test/internal/uvm"
+	"github.com/Microsoft/hcsshim/test/pkg/require"
+	testuvm "github.com/Microsoft/hcsshim/test/pkg/uvm"
 )
 
 // test if waiting after creating (but not starting) an LCOW uVM returns
@@ -252,8 +252,6 @@ func TestLCOWSimplePodScenario(t *testing.T) {
 
 // Helper to run the init process in an LCOW container; verify it exits with exit
 // code 0; verify stderr is empty; check output is as expected.
-//
-//nolint:unused // unused since tests are skipped
 func runInitProcess(t *testing.T, s cow.Container, expected string) {
 	t.Helper()
 	var errB bytes.Buffer
