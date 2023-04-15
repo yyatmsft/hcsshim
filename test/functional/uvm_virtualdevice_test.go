@@ -12,15 +12,13 @@ import (
 
 	"github.com/Microsoft/hcsshim/internal/uvm"
 	"github.com/Microsoft/hcsshim/osversion"
-	"github.com/Microsoft/hcsshim/test/internal/require"
-	tuvm "github.com/Microsoft/hcsshim/test/internal/uvm"
+	"github.com/Microsoft/hcsshim/test/pkg/require"
+	tuvm "github.com/Microsoft/hcsshim/test/pkg/uvm"
 )
 
 const lcowGPUBootFilesPath = "C:\\ContainerPlat\\LinuxBootFiles\\nvidiagpu"
 
 // findTestDevices returns the first pcip device on the host
-//
-//nolint:unused // unused since tests are skipped
 func findTestVirtualDevice() (string, error) {
 	out, err := exec.Command(
 		"powershell",

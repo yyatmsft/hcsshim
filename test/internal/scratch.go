@@ -12,7 +12,7 @@ import (
 	"github.com/Microsoft/hcsshim/internal/uvm"
 	"github.com/Microsoft/hcsshim/internal/wclayer"
 
-	tuvm "github.com/Microsoft/hcsshim/test/internal/uvm"
+	tuvm "github.com/Microsoft/hcsshim/test/pkg/uvm"
 )
 
 const lcowGlobalSVMID = "test.lcowglobalsvm"
@@ -26,6 +26,18 @@ func init() {
 	if hcsSystem, err := hcs.OpenComputeSystem(context.Background(), lcowGlobalSVMID); err == nil {
 		_ = hcsSystem.Terminate(context.Background())
 	}
+}
+
+// CreateWCOWBlankBaseLayer creates an as-blank-as-possible base WCOW layer, which
+// can be used as the base of a WCOW RW layer when it's not going to be the container's
+// scratch mount.
+func CreateWCOWBlankBaseLayer(ctx context.Context, t *testing.T) []string {
+	t.Helper()
+	tempDir := t.TempDir()
+	if err := wclayer.ConvertToBaseLayer(ctx, tempDir); err != nil {
+		t.Fatalf("Failed ConvertToBaseLayer: %s", err)
+	}
+	return []string{tempDir}
 }
 
 // CreateWCOWBlankRWLayer uses HCS to create a temp test directory containing a

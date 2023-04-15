@@ -11,7 +11,7 @@ import (
 	"github.com/Microsoft/hcsshim/internal/memory"
 	"github.com/Microsoft/hcsshim/osversion"
 	"github.com/Microsoft/hcsshim/pkg/annotations"
-	"github.com/Microsoft/hcsshim/test/internal/require"
+	"github.com/Microsoft/hcsshim/test/pkg/require"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
 )
 
@@ -24,7 +24,7 @@ func calculateJobCPUWeight(processorWeight uint32) uint32 {
 	return 1 + uint32((8*processorWeight)/processorWeightMax)
 }
 
-//nolint:deadcode,unused // may be used in future tests
+//nolint:unused // may be used in future tests
 func calculateJobCPURate(hostProcs uint32, processorCount uint32) uint32 {
 	rate := (processorCount * 10000) / hostProcs
 	if rate == 0 {
