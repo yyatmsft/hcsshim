@@ -4,7 +4,7 @@
     "default": {
       "name": "default",
       "createdDate": "2021-06-18 22:27:56Z",
-      "lastUpdatedDate": "2022-03-30 17:51:09Z"
+      "lastUpdatedDate": "2023-04-17 21:09:20Z"
     }
   },
   "results": {
@@ -217,6 +217,104 @@
       "ruleId": "SM03409",
       "justification": "Will be fixed later",
       "createdDate": "2022-03-31 04:49:03Z",
+      "expirationDate": null,
+      "type": null
+    },
+    "775141e92fe2259e553aa812e28afcf5071ebf559e75db0c9f265009ce42724e": {
+      "signature": "775141e92fe2259e553aa812e28afcf5071ebf559e75db0c9f265009ce42724e",
+      "alternativeSignatures": [],
+      "target": "vendor/github.com/docker/docker/api/swagger.yaml",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "credscan",
+      "ruleId": "CSCAN-GENERAL0060",
+      "justification": "Not owned by Microsoft",
+      "createdDate": "2023-04-17 21:09:20Z",
+      "expirationDate": null,
+      "type": null
+    },
+    "695885d9ee1c577f798f2a823b249247918b49351a9e80b683e4c43d01188283": {
+      "signature": "695885d9ee1c577f798f2a823b249247918b49351a9e80b683e4c43d01188283",
+      "alternativeSignatures": [],
+      "target": "vendor/github.com/docker/docker/api/swagger.yaml",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "policheck",
+      "ruleId": "80241",
+      "justification": "Not owned by Microsoft",
+      "createdDate": "2023-04-17 21:09:20Z",
+      "expirationDate": null,
+      "type": null
+    },
+    "858ac1cf11ed2a806a8d9effc6389393e230a57b584fe3bcc0168924c6c36c10": {
+      "signature": "858ac1cf11ed2a806a8d9effc6389393e230a57b584fe3bcc0168924c6c36c10",
+      "alternativeSignatures": [],
+      "target": "vendor/github.com/docker/docker/api/swagger.yaml",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "policheck",
+      "ruleId": "80241",
+      "justification": "Not owned by Microsoft",
+      "createdDate": "2023-04-17 21:09:20Z",
+      "expirationDate": null,
+      "type": null
+    },
+    "aaf6c5746c0d036b7e5f2aa7573038ec0c02273aa71b134de25916d8e3529dfe": {
+      "signature": "aaf6c5746c0d036b7e5f2aa7573038ec0c02273aa71b134de25916d8e3529dfe",
+      "alternativeSignatures": [],
+      "target": "vendor/github.com/docker/docker/api/swagger.yaml",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "policheck",
+      "ruleId": "80241",
+      "justification": "Not owned by Microsoft",
+      "createdDate": "2023-04-17 21:09:20Z",
+      "expirationDate": null,
+      "type": null
+    },
+    "6b1db1d93b66ebc4c57e9a044bcefeaad877f689ef7b41b3bb6b43274e5590c2": {
+      "signature": "6b1db1d93b66ebc4c57e9a044bcefeaad877f689ef7b41b3bb6b43274e5590c2",
+      "alternativeSignatures": [],
+      "target": "vendor/github.com/docker/docker/api/swagger.yaml",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "policheck",
+      "ruleId": "80241",
+      "justification": "Not owned by Microsoft",
+      "createdDate": "2023-04-17 21:09:20Z",
+      "expirationDate": null,
+      "type": null
+    },
+    "1c46623690cdcecc2a16062cba6c7180f5a4743800502068f0b6bebf9f08588a": {
+      "signature": "1c46623690cdcecc2a16062cba6c7180f5a4743800502068f0b6bebf9f08588a",
+      "alternativeSignatures": [],
+      "target": "vendor/github.com/docker/docker/api/swagger.yaml",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "policheck",
+      "ruleId": "80241",
+      "justification": "Not owned by Microsoft",
+      "createdDate": "2023-04-17 21:09:20Z",
+      "expirationDate": null,
+      "type": null
+    },
+    "5bb66a0f259d32cab1b388b2877e5fd5b00878c56eedb687a97022604bc9aa7d": {
+      "signature": "5bb66a0f259d32cab1b388b2877e5fd5b00878c56eedb687a97022604bc9aa7d",
+      "alternativeSignatures": [],
+      "target": "vendor/github.com/docker/docker/api/swagger.yaml",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "policheck",
+      "ruleId": "80241",
+      "justification": "Not owned by Microsoft",
+      "createdDate": "2023-04-17 21:09:20Z",
       "expirationDate": null,
       "type": null
     }
