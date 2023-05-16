@@ -540,6 +540,8 @@ func (h *Host) CreateContainer(ctx context.Context, id string, settings *prot.VM
 
 func (h *Host) modifyHostSettings(ctx context.Context, containerID string, req *guestrequest.ModificationRequest) (err error) {
 	switch req.ResourceType {
+	case guestresource.ResourceTypeSCSIDevice:
+		return modifySCSIDevice(ctx, req.RequestType, req.Settings.(*guestresource.SCSIDevice))
 	case guestresource.ResourceTypeMappedVirtualDisk:
 		mvd := req.Settings.(*guestresource.LCOWMappedVirtualDisk)
 		// find the actual controller number on the bus and update the incoming request.
@@ -553,8 +555,7 @@ func (h *Host) modifyHostSettings(ctx context.Context, containerID string, req *
 		if !mvd.ReadOnly {
 			localCtx, cancel := context.WithTimeout(ctx, time.Second*5)
 			defer cancel()
-			var source string
-			source, err = scsi.ControllerLunToName(localCtx, mvd.Controller, mvd.Lun)
+			source, err := scsi.GetDevicePath(localCtx, mvd.Controller, mvd.Lun, mvd.Partition)
 			if err != nil {
 				return err
 			}
@@ -939,6 +940,23 @@ func newInvalidRequestTypeError(rt guestrequest.RequestType) error {
 	return errors.Errorf("the RequestType %q is not supported", rt)
 }
 
+func modifySCSIDevice(
+	ctx context.Context,
+	rt guestrequest.RequestType,
+	msd *guestresource.SCSIDevice,
+) error {
+	switch rt {
+	case guestrequest.RequestTypeRemove:
+		cNum, err := scsi.ActualControllerNumber(ctx, msd.Controller)
+		if err != nil {
+			return err
+		}
+		return scsi.UnplugDevice(ctx, cNum, msd.Lun)
+	default:
+		return newInvalidRequestTypeError(rt)
+	}
+}
+
 func modifyMappedVirtualDisk(
 	ctx context.Context,
 	rt guestrequest.RequestType,
@@ -962,9 +980,14 @@ func modifyMappedVirtualDisk(
 					return errors.Wrapf(err, "mounting scsi device controller %d lun %d onto %s denied by policy", mvd.Controller, mvd.Lun, mvd.MountPath)
 				}
 			}
-
-			return scsi.Mount(mountCtx, mvd.Controller, mvd.Lun, mvd.MountPath,
-				mvd.ReadOnly, mvd.Encrypted, mvd.Options, mvd.VerityInfo)
+			config := &scsi.Config{
+				Encrypted:        mvd.Encrypted,
+				VerityInfo:       mvd.VerityInfo,
+				EnsureFilesystem: mvd.EnsureFilesystem,
+				Filesystem:       mvd.Filesystem,
+			}
+			return scsi.Mount(mountCtx, mvd.Controller, mvd.Lun, mvd.Partition, mvd.MountPath,
+				mvd.ReadOnly, mvd.Options, config)
 		}
 		return nil
 	case guestrequest.RequestTypeRemove:
@@ -974,12 +997,18 @@ func modifyMappedVirtualDisk(
 					return fmt.Errorf("unmounting scsi device at %s denied by policy: %w", mvd.MountPath, err)
 				}
 			}
-
-			if err := scsi.Unmount(ctx, mvd.Controller, mvd.Lun, mvd.MountPath, mvd.Encrypted, mvd.VerityInfo); err != nil {
+			config := &scsi.Config{
+				Encrypted:        mvd.Encrypted,
+				VerityInfo:       mvd.VerityInfo,
+				EnsureFilesystem: mvd.EnsureFilesystem,
+				Filesystem:       mvd.Filesystem,
+			}
+			if err := scsi.Unmount(ctx, mvd.Controller, mvd.Lun, mvd.Partition,
+				mvd.MountPath, config); err != nil {
 				return err
 			}
 		}
-		return scsi.UnplugDevice(ctx, mvd.Controller, mvd.Lun)
+		return nil
 	default:
 		return newInvalidRequestTypeError(rt)
 	}
