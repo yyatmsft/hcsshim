@@ -97,6 +97,24 @@ stages:
               targetFolder: "$(Build.StagingDirectory)/out"
             displayName: Copy cri-containerd test payload
 
+          - task: CopyFiles@2
+            inputs:
+              sourceFolder: "pkg/ncproxy"
+              contents: |
+                ncproxygrpc/v0/networkconfigproxy.proto
+                ncproxygrpc/v1/networkconfigproxy.proto
+              targetFolder: "$(Build.StagingDirectory)/out"
+            displayName: Copy ncproxygrpc api files
+          
+          - task: CopyFiles@2
+            inputs:
+              sourceFolder: "pkg/ncproxy"
+              contents: |
+                nodenetsvc/v0/nodenetsvc.proto
+                nodenetsvc/v1/nodenetsvc.proto
+              targetFolder: "$(Build.StagingDirectory)/out"
+            displayName: Copy nodenetsvc api files
+
           - script: |
               set -eoux
 
