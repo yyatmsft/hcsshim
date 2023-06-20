@@ -10,11 +10,13 @@ schedules:
     always: true
 
 variables:
-  WindowsContainerImage: onebranch.azurecr.io/windows/ltsc2019/vse2022:latest
-  LGTM.UploadSnapshot: true
-  # This needs to be removed when if we ever start building container images from this repository
-  DisableDockerDetector: true
-  DisableGoCliScan: true
+  - template: common-variables.yml@self
+
+  # recommended in wiki:
+  # https://eng.ms/docs/cloud-ai-platform/devdiv/one-engineering-system-1es/1es-docs/codeql/codeql-for-yaml-based-azure-pipelines
+  # https://eng.ms/docs/cloud-ai-platform/devdiv/one-engineering-system-1es/1es-docs/codeql/configuring-codeql#configuring-codeql-in-the-build-pipeline-v1x
+  - name: LGTM.UploadSnapshot
+    value: true
 
 resources:
   repositories:
@@ -26,7 +28,6 @@ resources:
       type: git
       name: ContainerPlatform/ContainerPlatform
       ref: refs/heads/main
-
 
 extends:
   template: v2/OneBranch.NonOfficial.CrossPlat.yml@ob-templates
