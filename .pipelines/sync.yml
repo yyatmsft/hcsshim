@@ -5,6 +5,9 @@
 
 trigger: none
 
+variables:
+  - template: common-variables.yml@self
+
 # schedules:
 #   - cron: "0 7 * * Mon-Fri" # 7AM UTC (Monday PST) on Weekdays
 #     displayName: Weekly Sync with Upstream Github
