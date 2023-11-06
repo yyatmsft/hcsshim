@@ -13,14 +13,13 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/Microsoft/go-winio"
+	"github.com/Microsoft/hcsshim/ext4/dmverity"
+	"github.com/Microsoft/hcsshim/internal/security"
 	"github.com/google/go-containerregistry/pkg/crane"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 
 	"github.com/Microsoft/hcsshim/ext4/tar2ext4"
 	"github.com/Microsoft/hcsshim/internal/log"
-	"github.com/Microsoft/hcsshim/internal/security"
-	"github.com/Microsoft/hcsshim/internal/wclayer"
 	"github.com/Microsoft/hcsshim/pkg/ociwclayer"
 
 	"github.com/Microsoft/hcsshim/test/internal/util"
@@ -30,8 +29,9 @@ import (
 // helper utilities for dealing with images
 
 type LazyImageLayers struct {
-	Image    string
-	Platform string
+	Image        string
+	Platform     string
+	AppendVerity bool
 	// TempPath is the path to create a temporary directory in.
 	// Defaults to [os.TempDir] if left empty.
 	TempPath string
@@ -41,6 +41,8 @@ type LazyImageLayers struct {
 	layers []string
 }
 
+type extractHandler func(ctx context.Context, rc io.ReadCloser, dir string, parents []string) error
+
 // Close removes the downloaded image layers.
 //
 // Does not take a [testing.TB] so it can be used in TestMain or init.
@@ -49,12 +51,9 @@ func (x *LazyImageLayers) Close(ctx context.Context) error {
 		return nil
 	}
 
-	if _, err := os.Stat(x.dir); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("path %q is not valid: %w", x.dir, err)
-	}
 	// DestroyLayer will remove the entire directory and all its contents, regardless of if
 	// its a Windows container layer or not.
-	if err := wclayer.DestroyLayer(ctx, x.dir); err != nil {
+	if err := util.DestroyLayer(ctx, x.dir); err != nil {
 		return fmt.Errorf("could not destroy layer directory %q: %w", x.dir, err)
 	}
 	return nil
@@ -93,17 +92,9 @@ func (x *LazyImageLayers) extractLayers(ctx context.Context) (err error) {
 		}
 	}
 
-	var extract func(context.Context, io.ReadCloser, string, []string) error
-	switch x.Platform {
-	case images.PlatformLinux:
-		extract = linuxImage
-	case images.PlatformWindows:
-		if err = winio.EnableProcessPrivileges([]string{winio.SeBackupPrivilege, winio.SeRestorePrivilege}); err != nil {
-			return err
-		}
-		extract = windowsImage
-	default:
-		return fmt.Errorf("unsupported platform %q", x.Platform)
+	extract, err := extractImageHandler(x.Platform, x.AppendVerity)
+	if err != nil {
+		return err
 	}
 
 	img, err := crane.Pull(x.Image, crane.WithPlatform(&v1.Platform{OS: x.Platform, Architecture: runtime.GOARCH}))
@@ -135,27 +126,85 @@ func (x *LazyImageLayers) extractLayers(ctx context.Context) (err error) {
 	return nil
 }
 
-func linuxImage(ctx context.Context, rc io.ReadCloser, dir string, _ []string) error {
-	f, err := os.Create(filepath.Join(dir, "layer.vhd"))
-	if err != nil {
-		return fmt.Errorf("create layer vhd: %w", err)
+func extractImageHandler(platform string, appendVerity bool) (extractHandler, error) {
+	var extract extractHandler
+	if platform == images.PlatformLinux {
+		extract = linuxExt4LayerExtractHandler()
+		if appendVerity {
+			extract = withAppendVerity(extract)
+		}
+		extract = withVhdFooter(extract)
+		return extract, nil
+	} else if platform == images.PlatformWindows {
+		return windowsImage, nil
 	}
-	// in case we fail before granting access; double close on file will no-op
-	defer f.Close()
+	return nil, fmt.Errorf("unsupported platform %q", platform)
+}
 
-	if err := tar2ext4.Convert(rc, f, tar2ext4.AppendVhdFooter, tar2ext4.ConvertWhiteout); err != nil {
-		return fmt.Errorf("convert to vhd %s: %w", f.Name(), err)
-	}
-	if err := f.Sync(); err != nil {
-		return fmt.Errorf("sync vhd %s to disk: %w", f.Name(), err)
-	}
-	f.Close()
+func linuxExt4LayerExtractHandler() extractHandler {
+	return func(_ context.Context, rc io.ReadCloser, dir string, _ []string) error {
+		f, err := os.Create(filepath.Join(dir, "layer.vhd"))
+		if err != nil {
+			return fmt.Errorf("create layer vhd: %w", err)
+		}
+		defer f.Close()
 
-	if err = security.GrantVmGroupAccess(f.Name()); err != nil {
-		return fmt.Errorf("grant vm group access to %s: %w", f.Name(), err)
+		convertOpts := []tar2ext4.Option{
+			tar2ext4.ConvertWhiteout,
+			tar2ext4.MaximumDiskSize(dmverity.RecommendedVHDSizeGB),
+		}
+		if err := tar2ext4.Convert(rc, f, convertOpts...); err != nil {
+			return fmt.Errorf("convert to ext4 %s: %w", f.Name(), err)
+		}
+		if err := f.Sync(); err != nil {
+			return fmt.Errorf("sync ext4 file %s to disk: %w", f.Name(), err)
+		}
+		return nil
 	}
+}
 
-	return nil
+func withAppendVerity(fn extractHandler) extractHandler {
+	return func(ctx context.Context, rc io.ReadCloser, dir string, parents []string) error {
+		if err := fn(ctx, rc, dir, parents); err != nil {
+			return err
+		}
+		f, err := os.OpenFile(filepath.Join(dir, "layer.vhd"), os.O_RDWR, 0)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+
+		if _, err := f.Seek(0, io.SeekEnd); err != nil {
+			return fmt.Errorf("unable to prepare file to append verity: %w", err)
+		}
+
+		if err := dmverity.ComputeAndWriteHashDevice(f, f); err != nil {
+			return fmt.Errorf("unable to compute and append hash device: %w", err)
+		}
+		return nil
+	}
+}
+
+func withVhdFooter(fn extractHandler) extractHandler {
+	return func(ctx context.Context, rc io.ReadCloser, dir string, parents []string) error {
+		if err := fn(ctx, rc, dir, parents); err != nil {
+			return err
+		}
+		f, err := os.OpenFile(filepath.Join(dir, "layer.vhd"), os.O_RDWR, 0)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+
+		if err := tar2ext4.ConvertToVhd(f); err != nil {
+			return fmt.Errorf("unable to convert file to VHD: %w", err)
+		}
+
+		if err = security.GrantVmGroupAccess(f.Name()); err != nil {
+			return fmt.Errorf("grant vm group access to %s: %w", f.Name(), err)
+		}
+		return nil
+	}
 }
 
 func windowsImage(ctx context.Context, rc io.ReadCloser, dir string, parents []string) error {

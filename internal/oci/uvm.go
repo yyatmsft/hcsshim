@@ -140,8 +140,14 @@ func parseAnnotationsPreferredRootFSType(ctx context.Context, a map[string]strin
 	return def
 }
 
-// handleAnnotationKernelDirectBoot handles parsing annotationKernelDirectBoot and setting
-// implied annotations from the result.
+// handleAnnotationBootFilesPath handles parsing annotations.BootFilesRootPath and setting
+// implied options from the result.
+func handleAnnotationBootFilesPath(ctx context.Context, a map[string]string, lopts *uvm.OptionsLCOW) {
+	lopts.UpdateBootFilesPath(ctx, parseAnnotationsString(a, annotations.BootFilesRootPath, lopts.BootFilesPath))
+}
+
+// handleAnnotationKernelDirectBoot handles parsing annotations.KernelDirectBoot and setting
+// implied options from the result.
 func handleAnnotationKernelDirectBoot(ctx context.Context, a map[string]string, lopts *uvm.OptionsLCOW) {
 	lopts.KernelDirect = ParseAnnotationsBool(ctx, a, annotations.KernelDirectBoot, lopts.KernelDirect)
 	if !lopts.KernelDirect {
@@ -149,8 +155,8 @@ func handleAnnotationKernelDirectBoot(ctx context.Context, a map[string]string, 
 	}
 }
 
-// handleAnnotationPreferredRootFSType handles parsing annotationPreferredRootFSType and setting
-// implied annotations from the result
+// handleAnnotationPreferredRootFSType handles parsing annotations.PreferredRootFSType and setting
+// implied options from the result
 func handleAnnotationPreferredRootFSType(ctx context.Context, a map[string]string, lopts *uvm.OptionsLCOW) {
 	lopts.PreferredRootFSType = parseAnnotationsPreferredRootFSType(ctx, a, annotations.PreferredRootFSType, lopts.PreferredRootFSType)
 	switch lopts.PreferredRootFSType {
@@ -161,8 +167,8 @@ func handleAnnotationPreferredRootFSType(ctx context.Context, a map[string]strin
 	}
 }
 
-// handleAnnotationFullyPhysicallyBacked handles parsing annotationFullyPhysicallyBacked and setting
-// implied annotations from the result. For both LCOW and WCOW options.
+// handleAnnotationFullyPhysicallyBacked handles parsing annotations.FullyPhysicallyBacked and setting
+// implied options from the result. For both LCOW and WCOW options.
 func handleAnnotationFullyPhysicallyBacked(ctx context.Context, a map[string]string, opts interface{}) {
 	switch options := opts.(type) {
 	case *uvm.OptionsLCOW:
@@ -244,7 +250,7 @@ func SpecToUVMCreateOpts(ctx context.Context, s *specs.Spec, id, owner string) (
 			WARNING!!!!!!!!!!
 
 			When adding an option here which must match some security policy by default, make sure that the correct default (ie matches
-			a default security policy) is applied in handleSecurityPolicy. Inadvertantly adding an "option" which defaults to false but MUST be
+			a default security policy) is applied in handleSecurityPolicy. Inadvertently adding an "option" which defaults to false but MUST be
 			true for a default security	policy to work will force the annotation to have be set by the team that owns the box. That will
 			be practically difficult and we	might not find out until a little late in the process.
 		*/
@@ -254,7 +260,7 @@ func SpecToUVMCreateOpts(ctx context.Context, s *specs.Spec, id, owner string) (
 		lopts.VPMemSizeBytes = parseAnnotationsUint64(ctx, s.Annotations, annotations.VPMemSize, lopts.VPMemSizeBytes)
 		lopts.VPMemNoMultiMapping = ParseAnnotationsBool(ctx, s.Annotations, annotations.VPMemNoMultiMapping, lopts.VPMemNoMultiMapping)
 		lopts.VPCIEnabled = ParseAnnotationsBool(ctx, s.Annotations, annotations.VPCIEnabled, lopts.VPCIEnabled)
-		lopts.BootFilesPath = parseAnnotationsString(s.Annotations, annotations.BootFilesRootPath, lopts.BootFilesPath)
+		handleAnnotationBootFilesPath(ctx, s.Annotations, lopts)
 		lopts.EnableScratchEncryption = ParseAnnotationsBool(ctx, s.Annotations, annotations.EncryptedScratchDisk, lopts.EnableScratchEncryption)
 		lopts.SecurityPolicy = parseAnnotationsString(s.Annotations, annotations.SecurityPolicy, lopts.SecurityPolicy)
 		lopts.SecurityPolicyEnforcer = parseAnnotationsString(s.Annotations, annotations.SecurityPolicyEnforcer, lopts.SecurityPolicyEnforcer)
@@ -274,6 +280,8 @@ func SpecToUVMCreateOpts(ctx context.Context, s *specs.Spec, id, owner string) (
 
 		// override the default GuestState filename if specified
 		lopts.GuestStateFile = parseAnnotationsString(s.Annotations, annotations.GuestStateFile, lopts.GuestStateFile)
+		// Set HclEnabled if specified. Else default to a null pointer, which is omitted from the resulting JSON.
+		lopts.HclEnabled = ParseAnnotationsNullableBool(ctx, s.Annotations, annotations.HclEnabled)
 		return lopts, nil
 	} else if IsWCOW(s) {
 		wopts := uvm.NewDefaultOptionsWCOW(id, owner)
@@ -305,10 +313,6 @@ func UpdateSpecFromOptions(s specs.Spec, opts *runhcsopts.Options) specs.Spec {
 
 	if _, ok := s.Annotations[annotations.MemorySizeInMB]; !ok && opts.VmMemorySizeInMb != 0 {
 		s.Annotations[annotations.MemorySizeInMB] = strconv.FormatInt(int64(opts.VmMemorySizeInMb), 10)
-	}
-
-	if _, ok := s.Annotations[annotations.GPUVHDPath]; !ok && opts.GPUVHDPath != "" {
-		s.Annotations[annotations.GPUVHDPath] = opts.GPUVHDPath
 	}
 
 	if _, ok := s.Annotations[annotations.NetworkConfigProxy]; !ok && opts.NCProxyAddr != "" {

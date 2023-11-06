@@ -161,13 +161,13 @@ func init() {
 		`.\uvmboot.exe -gcs lcow -boot-files-path "C:\ContainerPlat\LinuxBootFiles" -root-fs-type vhd -t -exec "/bin/bash"`
 }
 
-func createLCOWOptions(_ context.Context, c *cli.Context, id string) (*uvm.OptionsLCOW, error) {
+func createLCOWOptions(ctx context.Context, c *cli.Context, id string) (*uvm.OptionsLCOW, error) {
 	options := uvm.NewDefaultOptionsLCOW(id, "")
 	setGlobalOptions(c, options.Options)
 
 	// boot
 	if c.IsSet(bootFilesPathArgName) {
-		options.BootFilesPath = c.String(bootFilesPathArgName)
+		options.UpdateBootFilesPath(ctx, bootFilesPathArgName)
 	}
 
 	// kernel
@@ -227,9 +227,11 @@ func createLCOWOptions(_ context.Context, c *cli.Context, id string) (*uvm.Optio
 		if c.IsSet(outputHandlingArgName) {
 			switch strings.ToLower(c.String(outputHandlingArgName)) {
 			case "stdout":
-				options.OutputHandler = uvm.OutputHandler(func(r io.Reader) {
-					_, _ = io.Copy(os.Stdout, r)
-				})
+				options.OutputHandlerCreator = func(*uvm.Options) uvm.OutputHandler {
+					return func(r io.Reader) {
+						_, _ = io.Copy(os.Stdout, r)
+					}
+				}
 			default:
 				return nil, unrecognizedError(c.String(outputHandlingArgName), outputHandlingArgName)
 			}

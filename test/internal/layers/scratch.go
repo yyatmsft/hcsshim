@@ -9,6 +9,8 @@ import (
 
 	"github.com/Microsoft/hcsshim/internal/lcow"
 	"github.com/Microsoft/hcsshim/internal/uvm"
+
+	"github.com/Microsoft/hcsshim/test/internal/util"
 )
 
 const (
@@ -21,18 +23,24 @@ func CacheFile(_ context.Context, tb testing.TB, dir string) string {
 	tb.Helper()
 	if dir == "" {
 		dir = tb.TempDir()
+		tb.Cleanup(func() {
+			_ = util.RemoveAll(dir)
+		})
 	}
 	cache := filepath.Join(dir, CacheFileName)
 	return cache
 }
 
 // ScratchSpace creates an LCOW scratch space VHD at `dir\name`, and returns the dir and name.
-// If name, dir, or chache are empty, ScratchSpace uses a default name or creates a temporary
-// directory, respectively.
+// If name, (dir, or cache) are empty, ScratchSpace uses [ScratchSpace] (creates a temporary
+// directory), respectively.
 func ScratchSpace(ctx context.Context, tb testing.TB, vm *uvm.UtilityVM, name, dir, cache string) (string, string) {
 	tb.Helper()
 	if dir == "" {
 		dir = tb.TempDir()
+		tb.Cleanup(func() {
+			_ = util.RemoveAll(dir)
+		})
 	}
 	if cache == "" {
 		cache = CacheFile(ctx, tb, dir)
