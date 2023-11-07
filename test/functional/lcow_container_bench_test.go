@@ -4,41 +4,74 @@
 package functional
 
 import (
+	"context"
+	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	ctrdoci "github.com/containerd/containerd/oci"
 	cri_util "github.com/containerd/containerd/pkg/cri/util"
 
+	"github.com/Microsoft/hcsshim/internal/cmd"
 	"github.com/Microsoft/hcsshim/internal/hcsoci"
 	"github.com/Microsoft/hcsshim/internal/layers"
 	"github.com/Microsoft/hcsshim/internal/resources"
+	"github.com/Microsoft/hcsshim/internal/uvm"
 	"github.com/Microsoft/hcsshim/osversion"
 
-	"github.com/Microsoft/hcsshim/test/internal/cmd"
+	testcmd "github.com/Microsoft/hcsshim/test/internal/cmd"
 	"github.com/Microsoft/hcsshim/test/internal/container"
 	testlayers "github.com/Microsoft/hcsshim/test/internal/layers"
 	"github.com/Microsoft/hcsshim/test/internal/oci"
+	"github.com/Microsoft/hcsshim/test/internal/util"
 	"github.com/Microsoft/hcsshim/test/pkg/require"
-	"github.com/Microsoft/hcsshim/test/pkg/uvm"
+	testuvm "github.com/Microsoft/hcsshim/test/pkg/uvm"
 )
 
 func BenchmarkLCOW_Container(b *testing.B) {
 	requireFeatures(b, featureLCOW, featureContainer)
 	require.Build(b, osversion.RS5)
 
-	ctx := namespacedContext()
-	ls := linuxImageLayers(ctx, b)
+	pCtx := namespacedContext()
+	ls := linuxImageLayers(pCtx, b)
 
-	// Create a new uvm per benchmark in case any left over state lingers
+	// Create a new uVM per benchmark in case any left over state lingers
+
+	// there is (potentially) a memory leak in the Linux GCS that causes "memory usage for cgroup exceeded threshold"
+	// errors for the `/gcs` cgroup to be raised.
+	// so every so often iterations, we re-create the uVM
+	const recreateIters = 100
 
 	b.Run("Create", func(b *testing.B) {
-		vm := uvm.CreateAndStartLCOWFromOpts(ctx, b, defaultLCOWOptions(b))
-		cache := testlayers.CacheFile(ctx, b, "")
+		var (
+			vm        *uvm.UtilityVM
+			vmCleanup testuvm.CleanupFn
+			cache     string
+		)
+		b.Cleanup(func() {
+			if vmCleanup != nil {
+				vmCleanup(pCtx)
+			}
+		})
 
 		b.StopTimer()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
+			ctx, cancel := context.WithTimeout(pCtx, benchmarkIterationTimeout)
+
+			if i%recreateIters == 0 {
+				if vmCleanup != nil {
+					vmCleanup(ctx)
+				}
+				// recreate the uVM
+				opts := defaultLCOWOptions(b)
+				opts.ID += util.RandNameSuffix(i)
+				vm, vmCleanup = testuvm.CreateLCOW(ctx, b, opts)
+				testuvm.Start(ctx, b, vm)
+				cache = testlayers.CacheFile(ctx, b, "")
+			}
+
 			id := cri_util.GenerateID()
 			scratch, _ := testlayers.ScratchSpace(ctx, b, vm, "", "", cache)
 			spec := oci.CreateLinuxSpec(ctx, b, id,
@@ -71,11 +104,11 @@ func BenchmarkLCOW_Container(b *testing.B) {
 			}
 			b.StopTimer()
 
-			// container creations launches gorountines on the guest that do
+			// container creation launches go rountines on the guest that do
 			// not finish until the init process has terminated.
 			// so start the container, then clean everything up
 			init := container.Start(ctx, b, c, nil)
-			cmd.WaitExitCode(ctx, b, init, 0)
+			testcmd.WaitExitCode(ctx, b, init, 0)
 
 			container.Kill(ctx, b, c)
 			container.Wait(ctx, b, c)
@@ -85,16 +118,40 @@ func BenchmarkLCOW_Container(b *testing.B) {
 			if err := c.Close(); err != nil {
 				b.Errorf("could not close container %q: %v", c.ID(), err)
 			}
+
+			cancel()
 		}
 	})
 
 	b.Run("Start", func(b *testing.B) {
-		vm := uvm.CreateAndStartLCOWFromOpts(ctx, b, defaultLCOWOptions(b))
-		cache := testlayers.CacheFile(ctx, b, "")
+		var (
+			vm        *uvm.UtilityVM
+			vmCleanup testuvm.CleanupFn
+			cache     string
+		)
+		b.Cleanup(func() {
+			if vmCleanup != nil {
+				vmCleanup(pCtx)
+			}
+		})
 
 		b.StopTimer()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
+			ctx, cancel := context.WithTimeout(pCtx, benchmarkIterationTimeout)
+
+			if i%recreateIters == 0 {
+				if vmCleanup != nil {
+					vmCleanup(ctx)
+				}
+				// recreate the uVM
+				opts := defaultLCOWOptions(b)
+				opts.ID += util.RandNameSuffix(i)
+				vm, vmCleanup = testuvm.CreateLCOW(ctx, b, opts)
+				testuvm.Start(ctx, b, vm)
+				cache = testlayers.CacheFile(ctx, b, "")
+			}
+
 			id := cri_util.GenerateID()
 			scratch, _ := testlayers.ScratchSpace(ctx, b, vm, "", "", cache)
 			spec := oci.CreateLinuxSpec(ctx, b, id,
@@ -110,23 +167,46 @@ func BenchmarkLCOW_Container(b *testing.B) {
 			}
 			b.StopTimer()
 
-			init := cmd.Create(ctx, b, c, nil, nil)
-			cmd.Start(ctx, b, init)
-			cmd.WaitExitCode(ctx, b, init, 0)
+			init := testcmd.Create(ctx, b, c, nil, nil)
+			testcmd.Start(ctx, b, init)
+			testcmd.WaitExitCode(ctx, b, init, 0)
 
 			container.Kill(ctx, b, c)
 			container.Wait(ctx, b, c)
 			cleanup()
+			cancel()
 		}
 	})
 
 	b.Run("InitExec", func(b *testing.B) {
-		vm := uvm.CreateAndStartLCOWFromOpts(ctx, b, defaultLCOWOptions(b))
-		cache := testlayers.CacheFile(ctx, b, "")
+		var (
+			vm        *uvm.UtilityVM
+			vmCleanup testuvm.CleanupFn
+			cache     string
+		)
+		b.Cleanup(func() {
+			if vmCleanup != nil {
+				vmCleanup(pCtx)
+			}
+		})
 
 		b.StopTimer()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
+			ctx, cancel := context.WithTimeout(pCtx, benchmarkIterationTimeout)
+
+			if i%recreateIters == 0 {
+				if vmCleanup != nil {
+					vmCleanup(ctx)
+				}
+				// recreate the uVM
+				opts := defaultLCOWOptions(b)
+				opts.ID += util.RandNameSuffix(i)
+				vm, vmCleanup = testuvm.CreateLCOW(ctx, b, opts)
+				testuvm.Start(ctx, b, vm)
+				cache = testlayers.CacheFile(ctx, b, "")
+			}
+
 			id := cri_util.GenerateID()
 			scratch, _ := testlayers.ScratchSpace(ctx, b, vm, "", "", cache)
 			spec := oci.CreateLinuxSpec(ctx, b, id,
@@ -138,28 +218,53 @@ func BenchmarkLCOW_Container(b *testing.B) {
 			if err := c.Start(ctx); err != nil {
 				b.Fatalf("could not start %q: %v", c.ID(), err)
 			}
-			init := cmd.Create(ctx, b, c, nil, nil)
+			init := testcmd.Create(ctx, b, c, nil, nil)
 
 			b.StartTimer()
-			cmd.Start(ctx, b, init)
+			if err := init.Start(); err != nil {
+				b.Fatalf("failed to start init command: %v", err)
+			}
 			b.StopTimer()
 
-			cmd.Kill(ctx, b, init)
-			cmd.WaitExitCode(ctx, b, init, 137)
+			testcmd.Kill(ctx, b, init)
+			testcmd.WaitExitCode(ctx, b, init, testcmd.ForcedKilledExitCode)
 
 			container.Kill(ctx, b, c)
 			container.Wait(ctx, b, c)
 			cleanup()
+			cancel()
 		}
 	})
 
 	b.Run("InitExecKill", func(b *testing.B) {
-		vm := uvm.CreateAndStartLCOWFromOpts(ctx, b, defaultLCOWOptions(b))
-		cache := testlayers.CacheFile(ctx, b, "")
+		var (
+			vm        *uvm.UtilityVM
+			vmCleanup testuvm.CleanupFn
+			cache     string
+		)
+		b.Cleanup(func() {
+			if vmCleanup != nil {
+				vmCleanup(pCtx)
+			}
+		})
 
 		b.StopTimer()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
+			ctx, cancel := context.WithTimeout(pCtx, benchmarkIterationTimeout)
+
+			if i%recreateIters == 0 {
+				if vmCleanup != nil {
+					vmCleanup(ctx)
+				}
+				// recreate the uVM
+				opts := defaultLCOWOptions(b)
+				opts.ID += util.RandNameSuffix(i)
+				vm, vmCleanup = testuvm.CreateLCOW(ctx, b, opts)
+				testuvm.Start(ctx, b, vm)
+				cache = testlayers.CacheFile(ctx, b, "")
+			}
+
 			id := cri_util.GenerateID()
 			scratch, _ := testlayers.ScratchSpace(ctx, b, vm, "", "", cache)
 			spec := oci.CreateLinuxSpec(ctx, b, id,
@@ -171,23 +276,189 @@ func BenchmarkLCOW_Container(b *testing.B) {
 			init := container.Start(ctx, b, c, nil)
 
 			b.StartTimer()
-			cmd.Kill(ctx, b, init)
-			cmd.WaitExitCode(ctx, b, init, 137)
+			if ok, err := init.Process.Kill(ctx); !ok {
+				b.Fatalf("could not deliver kill to init command")
+			} else if err != nil {
+				b.Fatalf("could not kill init command: %v", err)
+			}
+
+			if err := init.Wait(); err != nil {
+				ee := &cmd.ExitError{}
+				if !errors.As(err, &ee) {
+					b.Fatalf("failed to wait on init command: %v", err)
+				}
+				if ee.ExitCode() != testcmd.ForcedKilledExitCode {
+					b.Fatalf("got exit code %d, wanted %d", ee.ExitCode(), testcmd.ForcedKilledExitCode)
+				}
+			}
 			b.StopTimer()
 
 			container.Kill(ctx, b, c)
 			container.Wait(ctx, b, c)
 			cleanup()
+			cancel()
 		}
 	})
 
-	b.Run("ContainerKill", func(b *testing.B) {
-		vm := uvm.CreateAndStartLCOWFromOpts(ctx, b, defaultLCOWOptions(b))
-		cache := testlayers.CacheFile(ctx, b, "")
+	b.Run("Exec", func(b *testing.B) {
+		var (
+			vm        *uvm.UtilityVM
+			vmCleanup testuvm.CleanupFn
+			cache     string
+		)
+		b.Cleanup(func() {
+			if vmCleanup != nil {
+				vmCleanup(pCtx)
+			}
+		})
 
 		b.StopTimer()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
+			ctx, cancel := context.WithTimeout(pCtx, benchmarkIterationTimeout)
+
+			if i%recreateIters == 0 {
+				if vmCleanup != nil {
+					vmCleanup(ctx)
+				}
+				// recreate the uVM
+				opts := defaultLCOWOptions(b)
+				opts.ID += util.RandNameSuffix(i)
+				vm, vmCleanup = testuvm.CreateLCOW(ctx, b, opts)
+				testuvm.Start(ctx, b, vm)
+				cache = testlayers.CacheFile(ctx, b, "")
+			}
+
+			id := cri_util.GenerateID()
+			scratch, _ := testlayers.ScratchSpace(ctx, b, vm, "", "", cache)
+			spec := oci.CreateLinuxSpec(ctx, b, id,
+				oci.DefaultLinuxSpecOpts(id,
+					ctrdoci.WithProcessArgs("/bin/sh", "-c", oci.TailNullArgs),
+					oci.WithWindowsLayerFolders(append(ls, scratch)))...)
+
+			c, _, cleanup := container.Create(ctx, b, vm, spec, id, hcsOwner)
+			init := container.Start(ctx, b, c, nil)
+
+			ps := oci.CreateLinuxSpec(ctx, b, id,
+				oci.DefaultLinuxSpecOpts(id,
+					ctrdoci.WithDefaultPathEnv,
+					ctrdoci.WithProcessArgs("/bin/sh", "-c", oci.TailNullArgs))...,
+			).Process
+
+			exec := testcmd.Create(ctx, b, c, ps, nil)
+
+			b.StartTimer()
+			if err := exec.Start(); err != nil {
+				b.Fatalf("failed to start %q: %v", strings.Join(exec.Spec.Args, " "), err)
+			}
+			b.StopTimer()
+
+			testcmd.Kill(ctx, b, exec)
+			testcmd.WaitExitCode(ctx, b, exec, testcmd.ForcedKilledExitCode)
+
+			testcmd.Kill(ctx, b, init)
+			testcmd.WaitExitCode(ctx, b, init, testcmd.ForcedKilledExitCode)
+			container.Kill(ctx, b, c)
+			container.Wait(ctx, b, c)
+			cleanup()
+			cancel()
+		}
+	})
+
+	b.Run("ExecSync", func(b *testing.B) {
+		var (
+			vm        *uvm.UtilityVM
+			vmCleanup testuvm.CleanupFn
+			cache     string
+		)
+		b.Cleanup(func() {
+			if vmCleanup != nil {
+				vmCleanup(pCtx)
+			}
+		})
+
+		b.StopTimer()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			ctx, cancel := context.WithTimeout(pCtx, benchmarkIterationTimeout)
+
+			if i%recreateIters == 0 {
+				if vmCleanup != nil {
+					vmCleanup(ctx)
+				}
+				// recreate the uVM
+				opts := defaultLCOWOptions(b)
+				opts.ID += util.RandNameSuffix(i)
+				vm, vmCleanup = testuvm.CreateLCOW(ctx, b, opts)
+				testuvm.Start(ctx, b, vm)
+				cache = testlayers.CacheFile(ctx, b, "")
+			}
+
+			id := cri_util.GenerateID()
+			scratch, _ := testlayers.ScratchSpace(ctx, b, vm, "", "", cache)
+			spec := oci.CreateLinuxSpec(ctx, b, id,
+				oci.DefaultLinuxSpecOpts(id,
+					ctrdoci.WithProcessArgs("/bin/sh", "-c", oci.TailNullArgs),
+					oci.WithWindowsLayerFolders(append(ls, scratch)))...)
+
+			c, _, cleanup := container.Create(ctx, b, vm, spec, id, hcsOwner)
+			init := container.Start(ctx, b, c, nil)
+
+			ps := oci.CreateLinuxSpec(ctx, b, id,
+				oci.DefaultLinuxSpecOpts(id,
+					ctrdoci.WithDefaultPathEnv,
+					ctrdoci.WithProcessArgs("/bin/sh", "-c", "true"))...,
+			).Process
+
+			exec := testcmd.Create(ctx, b, c, ps, nil)
+
+			b.StartTimer()
+			if err := exec.Start(); err != nil {
+				b.Fatalf("failed to start %q: %v", strings.Join(exec.Spec.Args, " "), err)
+			}
+			if err := exec.Wait(); err != nil {
+				b.Fatalf("failed to wait on %q: %v", strings.Join(exec.Spec.Args, " "), err)
+			}
+			b.StopTimer()
+
+			testcmd.Kill(ctx, b, init)
+			testcmd.WaitExitCode(ctx, b, init, testcmd.ForcedKilledExitCode)
+			container.Kill(ctx, b, c)
+			container.Wait(ctx, b, c)
+			cleanup()
+			cancel()
+		}
+	})
+
+	b.Run("ContainerKill", func(b *testing.B) {
+		var (
+			vm        *uvm.UtilityVM
+			vmCleanup testuvm.CleanupFn
+			cache     string
+		)
+		b.Cleanup(func() {
+			if vmCleanup != nil {
+				vmCleanup(pCtx)
+			}
+		})
+
+		b.StopTimer()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			ctx, cancel := context.WithTimeout(pCtx, benchmarkIterationTimeout)
+
+			if i%recreateIters == 0 {
+				if vmCleanup != nil {
+					vmCleanup(ctx)
+				}
+				// recreate the uVM
+				opts := defaultLCOWOptions(b)
+				opts.ID += util.RandNameSuffix(i)
+				vm, vmCleanup = testuvm.CreateLCOW(ctx, b, opts)
+				testuvm.Start(ctx, b, vm)
+				cache = testlayers.CacheFile(ctx, b, "")
+			}
+
 			id := cri_util.GenerateID()
 			scratch, _ := testlayers.ScratchSpace(ctx, b, vm, "", "", cache)
 			spec := oci.CreateLinuxSpec(ctx, b, id,
@@ -206,7 +477,7 @@ func BenchmarkLCOW_Container(b *testing.B) {
 			//
 			// So ... to test container kill and wait times, we need to first start and wait on the init process
 			init := container.Start(ctx, b, c, nil)
-			cmd.WaitExitCode(ctx, b, init, 0)
+			testcmd.WaitExitCode(ctx, b, init, 0)
 
 			b.StartTimer()
 			container.Kill(ctx, b, c)
@@ -214,6 +485,7 @@ func BenchmarkLCOW_Container(b *testing.B) {
 			b.StopTimer()
 
 			cleanup()
+			cancel()
 		}
 	})
 }

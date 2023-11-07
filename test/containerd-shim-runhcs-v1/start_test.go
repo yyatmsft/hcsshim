@@ -13,14 +13,17 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/Microsoft/go-winio"
-	"github.com/Microsoft/hcsshim/pkg/annotations"
-	"github.com/containerd/containerd/runtime/v2/task"
+	task "github.com/containerd/containerd/api/runtime/task/v2"
 	"github.com/containerd/ttrpc"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/opencontainers/runtime-tools/generate"
+
+	"github.com/Microsoft/hcsshim/pkg/annotations"
+
+	"github.com/Microsoft/hcsshim/test/internal/util"
+	"github.com/Microsoft/hcsshim/test/pkg/require"
 )
 
 func createStartCommand(t *testing.T) (*exec.Cmd, *bytes.Buffer, *bytes.Buffer) {
@@ -31,12 +34,10 @@ func createStartCommand(t *testing.T) (*exec.Cmd, *bytes.Buffer, *bytes.Buffer) 
 func createStartCommandWithID(t *testing.T, id string) (*exec.Cmd, *bytes.Buffer, *bytes.Buffer) {
 	t.Helper()
 	bundleDir := t.TempDir()
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("failed os.Getwd() with: %v", err)
-	}
+
+	shim := require.BinaryInPath(t, shimExe)
 	cmd := exec.Command(
-		filepath.Join(wd, "containerd-shim-runhcs-v1.exe"),
+		shim,
 		"--namespace", t.Name(),
 		"--address", "need-a-real-one",
 		"--publish-binary", "need-a-real-one",
@@ -44,6 +45,9 @@ func createStartCommandWithID(t *testing.T, id string) (*exec.Cmd, *bytes.Buffer
 		"start",
 	)
 	cmd.Dir = bundleDir
+
+	t.Logf("execing start command: %s", cmd.String())
+
 	outb := bytes.Buffer{}
 	errb := bytes.Buffer{}
 	cmd.Stdout = &outb
@@ -53,18 +57,7 @@ func createStartCommandWithID(t *testing.T, id string) (*exec.Cmd, *bytes.Buffer
 
 func cleanupTestBundle(t *testing.T, dir string) {
 	t.Helper()
-	var err error
-	for i := 0; i < 2; i++ {
-		// sporadic access-denies errors if trying to delete bundle (namely panic.log) before OS realizes
-		// shim exited and releases dile handle
-		if err = os.RemoveAll(dir); err == nil {
-			// does not os.RemoveAll does not if path doesn't exist
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-
-	if err != nil {
+	if err := util.RemoveAll(dir); err != nil {
 		t.Errorf("failed removing test bundle with: %v", err)
 	}
 }

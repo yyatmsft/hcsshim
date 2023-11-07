@@ -70,6 +70,7 @@ const (
 	// `spec.Windows.Resources.Storage.Iops`.
 	ContainerStorageQoSIopsMaximum = "io.microsoft.container.storage.qos.iopsmaximum"
 
+	// Deprecated: GPU VHDs are no longer supported.
 	// GPUVHDPath overrides the default path to search for the gpu vhd
 	GPUVHDPath = "io.microsoft.lcow.gpuvhdpath"
 
@@ -125,7 +126,7 @@ const (
 	// MemoryHighMMIOBaseInMB indicates the high MMIO base in MB
 	MemoryHighMMIOBaseInMB = "io.microsoft.virtualmachine.computetopology.memory.highmmiobaseinmb"
 
-	// MemoryHighMMIOBaseInMB indicates the high MMIO gap in MB
+	// MemoryHighMMIOGapInMB indicates the high MMIO gap in MB
 	MemoryHighMMIOGapInMB = "io.microsoft.virtualmachine.computetopology.memory.highmmiogapinmb"
 
 	// ProcessorCount overrides the hypervisor isolated vCPU count set
@@ -223,6 +224,9 @@ const (
 	// This allows for better fallback mechanics.
 	SecurityPolicyEnforcer = "io.microsoft.virtualmachine.lcow.enforcer"
 
+	// HclEnabled specifies whether to enable the host compatibility layer.
+	HclEnabled = "io.microsoft.virtualmachine.lcow.hcl-enabled"
+
 	// ContainerProcessDumpLocation specifies a path inside of containers to save process dumps to. As
 	// the scratch space for a container is generally cleaned up after exit, this is best set to a volume mount of
 	// some kind (vhd, bind mount, fileshare mount etc.)
@@ -232,6 +236,11 @@ const (
 	// process dump for Windows containers. The supported options are "mini", and "full".
 	// See DumpType: https://docs.microsoft.com/en-us/windows/win32/wer/collecting-user-mode-dumps
 	WCOWProcessDumpType = "io.microsoft.wcow.processdumptype"
+
+	// WCOWProcessDumpCount specifies the maximum number of dumps to be collected in the specified
+	// ContainerProcessDumpLocation path. When the maximum value is exceeded, the oldest dump file in the
+	// folder will be replaced by the new dump file. The default value is 10.
+	WCOWProcessDumpCount = "io.microsoft.wcow.processdumpcount"
 
 	// RLimitCore specifies the core rlimit value for a container. This will need to be set
 	// in order to have core dumps generated for a given container.
