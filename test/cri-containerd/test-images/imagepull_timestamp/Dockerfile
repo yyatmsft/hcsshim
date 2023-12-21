@@ -9,7 +9,7 @@
 # `docker push mtbar131/hcsshim:nanoserver_test`
 
 # Base image
-FROM mcr.microsoft.com/windows/nanoserver:1909
+FROM mcr.microsoft.com/windows/nanoserver:1909@sha256:d9def4c5fb0be015456423565d8c4a830ae6874acd9b3934a4b0f20c3750e2c1
 # Get administrator privileges
 USER containeradministrator
 
