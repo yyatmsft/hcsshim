@@ -9,7 +9,9 @@
 # `docker push cplatpublic.azurecr.io/timestamp:latest`
 
 # Base image
-FROM mcr.microsoft.com/windows/nanoserver:1909@sha256:d9def4c5fb0be015456423565d8c4a830ae6874acd9b3934a4b0f20c3750e2c1
+
+FROM mcr.microsoft.com/windows/nanoserver:ltsc2022@sha256:56a7c823d8aed810849a38f47d995a727bf3de1ec611394025e1de24898a9622
+
 # Get administrator privileges
 USER containeradministrator
 
